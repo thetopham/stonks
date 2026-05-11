@@ -1,0 +1,234 @@
+# Dry-run only. This bot never submits broker orders.
+ledger_path = "data/paper-ledger.sqlite3"
+starting_cash = 100000.0
+max_position_pct = 0.10
+max_open_positions = 100000
+commission_pct = 0.00
+slippage_pct = 0.02
+
+[execution]
+dry_run = true
+live_trading_enabled = false
+scan_interval_seconds = 900
+
+[strategy]
+entry_score = 65
+exit_score = 35
+max_rsi_for_entry = 70
+stop_loss_pct = 0.07
+take_profit_pct = 0.15
+
+[provider]
+command = "/home/matt/.local/bin/uvx"
+args = ["--from", "tradingview-mcp-server", "tradingview-mcp"]
+timeframe = "1D"
+
+# Existing baseline trackers.
+[[watchlist]]
+symbol = "AAPL"
+exchange = "NASDAQ"
+
+[[watchlist]]
+symbol = "SPY"
+exchange = "NYSE"
+
+# AI Supercycle Phase 1 — semis, memory/storage, photonics/optics.
+[[watchlist]]
+symbol = "NVDA"
+exchange = "NASDAQ"
+
+[[watchlist]]
+symbol = "AMD"
+exchange = "NASDAQ"
+
+[[watchlist]]
+symbol = "ARM"
+exchange = "NASDAQ"
+
+[[watchlist]]
+symbol = "INTC"
+exchange = "NASDAQ"
+
+[[watchlist]]
+symbol = "AVGO"
+exchange = "NASDAQ"
+
+[[watchlist]]
+symbol = "MU"
+exchange = "NASDAQ"
+
+[[watchlist]]
+symbol = "WDC"
+exchange = "NASDAQ"
+
+[[watchlist]]
+symbol = "SNDK"
+exchange = "NASDAQ"
+
+[[watchlist]]
+symbol = "NOK"
+exchange = "NYSE"
+
+[[watchlist]]
+symbol = "LITE"
+exchange = "NASDAQ"
+
+[[watchlist]]
+symbol = "COHR"
+exchange = "NYSE"
+
+# AI Supercycle Phase 2 — compute, AI data centers, power/grid/cooling, networks.
+[[watchlist]]
+symbol = "IREN"
+exchange = "NASDAQ"
+
+[[watchlist]]
+symbol = "CIFR"
+exchange = "NASDAQ"
+
+[[watchlist]]
+symbol = "WULF"
+exchange = "NASDAQ"
+
+[[watchlist]]
+symbol = "CORZ"
+exchange = "NASDAQ"
+
+[[watchlist]]
+symbol = "NBIS"
+exchange = "NASDAQ"
+
+[[watchlist]]
+symbol = "CRWV"
+exchange = "NASDAQ"
+
+[[watchlist]]
+symbol = "VRT"
+exchange = "NYSE"
+
+[[watchlist]]
+symbol = "ETN"
+exchange = "NYSE"
+
+[[watchlist]]
+symbol = "GEV"
+exchange = "NYSE"
+
+[[watchlist]]
+symbol = "CEG"
+exchange = "NASDAQ"
+
+[[watchlist]]
+symbol = "SMR"
+exchange = "NYSE"
+
+[[watchlist]]
+symbol = "OKLO"
+exchange = "NYSE"
+
+[[watchlist]]
+symbol = "ANET"
+exchange = "NYSE"
+
+[[watchlist]]
+symbol = "MRVL"
+exchange = "NASDAQ"
+
+[[watchlist]]
+symbol = "CSCO"
+exchange = "NASDAQ"
+
+# AI Supercycle Phase 3 — rare earths, space/defense/drones, robotics/autonomy.
+[[watchlist]]
+symbol = "MP"
+exchange = "NYSE"
+
+[[watchlist]]
+symbol = "USAR"
+exchange = "NASDAQ"
+
+# Ucore Rare Metals from the image; OTC/Yahoo fallback may be price-only if TradingView analysis is unavailable.
+[[watchlist]]
+symbol = "UURAF"
+exchange = "OTC"
+
+[[watchlist]]
+symbol = "FCX"
+exchange = "NYSE"
+
+[[watchlist]]
+symbol = "ALB"
+exchange = "NYSE"
+
+[[watchlist]]
+symbol = "ASTS"
+exchange = "NASDAQ"
+
+[[watchlist]]
+symbol = "RKLB"
+exchange = "NASDAQ"
+
+[[watchlist]]
+symbol = "LUNR"
+exchange = "NASDAQ"
+
+[[watchlist]]
+symbol = "KTOS"
+exchange = "NASDAQ"
+
+[[watchlist]]
+symbol = "AVAV"
+exchange = "NASDAQ"
+
+[[watchlist]]
+symbol = "ONDS"
+exchange = "NASDAQ"
+
+[[watchlist]]
+symbol = "TSLA"
+exchange = "NASDAQ"
+
+[[watchlist]]
+symbol = "PATH"
+exchange = "NYSE"
+
+[[watchlist]]
+symbol = "SYM"
+exchange = "NASDAQ"
+
+[[watchlist]]
+symbol = "SERV"
+exchange = "NASDAQ"
+
+# AI Supercycle Phase 4 — AI software dominance and AGI infrastructure.
+[[watchlist]]
+symbol = "MSFT"
+exchange = "NASDAQ"
+
+[[watchlist]]
+symbol = "GOOGL"
+exchange = "NASDAQ"
+
+[[watchlist]]
+symbol = "AMZN"
+exchange = "NASDAQ"
+
+[[watchlist]]
+symbol = "META"
+exchange = "NASDAQ"
+
+[[watchlist]]
+symbol = "ORCL"
+exchange = "NYSE"
+
+[[watchlist]]
+symbol = "QBTS"
+exchange = "NYSE"
+
+[[watchlist]]
+symbol = "IONQ"
+exchange = "NYSE"
+
+[[watchlist]]
+symbol = "RGTI"
+exchange = "NASDAQ"

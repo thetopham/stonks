@@ -1,0 +1,17 @@
+[Unit]
+Description=Stonks Paper Bot read-only dashboard
+Documentation=file:/home/matt/workspace/stonks-paper-bot/README.md
+After=network-online.target stonks-paper-bot.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/matt/workspace/stonks-paper-bot
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/home/matt/workspace/stonks-paper-bot/.dashboard.env
+ExecStart=/home/matt/workspace/stonks-paper-bot/.venv/bin/stonks-paper dashboard --config /home/matt/workspace/stonks-paper-bot/config.paper.toml --host 0.0.0.0 --port 8791
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,30 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+dist/
+build/
+
+# Runtime state / generated data
+data/
+*.sqlite
+*.sqlite3
+*.db
+
+# Local secrets / dashboard auth
+.env
+*.env
+.dashboard.env
+dashboard.url
+
+# Local editor / OS noise
+.DS_Store
+*.swp
+*.swo
+.*.swp
+.vscode/
+.idea/

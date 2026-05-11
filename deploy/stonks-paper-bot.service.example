@@ -1,0 +1,18 @@
+[Unit]
+Description=stonks-paper-bot dry-run stock scanner
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/matt/workspace/stonks-paper-bot
+ExecStart=/home/matt/workspace/stonks-paper-bot/.venv/bin/stonks-paper watch --config /home/matt/workspace/stonks-paper-bot/config.paper.toml
+Restart=on-failure
+RestartSec=30
+
+# Safety boundary: this service only runs the paper-trading bot. The app rejects live_trading_enabled=true.
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target
