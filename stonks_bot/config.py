@@ -24,6 +24,36 @@ class StrategyConfig:
 
 
 @dataclass(slots=True)
+class SelectionConfig:
+    mode: str = "ranked"
+    preview_top: int = 10
+
+
+@dataclass(slots=True)
+class ScreenerConfig:
+    enabled: bool = False
+    # curated = local watchlist/curated baskets only; mcp = dynamic MCP scans + watchlist;
+    # hybrid = dynamic MCP scans + configured local baskets.
+    source: str = "curated"
+    universes: list[str] = field(default_factory=lambda: ["watchlist"])
+    exchanges: list[str] = field(default_factory=lambda: ["NASDAQ", "NYSE"])
+    dynamic_sources: list[str] = field(
+        default_factory=lambda: ["rating_strong_buy", "rating_buy", "volume_breakout", "smart_volume", "top_gainers"]
+    )
+    per_source_limit: int = 50
+    max_candidates: int = 100
+    exclude_symbols: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class OptimizerConfig:
+    enabled: bool = True
+    cash_reserve_pct: float = 0.05
+    max_new_buys_per_scan: int = 3
+    min_position_notional: float = 25.0
+
+
+@dataclass(slots=True)
 class ProviderConfig:
     command: str = "/home/matt/.local/bin/uvx"
     args: list[str] = field(default_factory=lambda: ["--from", "tradingview-mcp-server", "tradingview-mcp"])
@@ -50,9 +80,30 @@ class BotConfig:
     slippage_pct: float = 0.02
     execution: ExecutionConfig = field(default_factory=ExecutionConfig)
     strategy: StrategyConfig = field(default_factory=StrategyConfig)
+    selection: SelectionConfig = field(default_factory=SelectionConfig)
+    screener: ScreenerConfig = field(default_factory=ScreenerConfig)
+    optimizer: OptimizerConfig = field(default_factory=OptimizerConfig)
     provider: ProviderConfig = field(default_factory=ProviderConfig)
     broker: BrokerConfig = field(default_factory=BrokerConfig)
     watchlist: list[WatchItem] = field(default_factory=list)
+
+
+def _str_list(values: object, *, upper: bool = False, lower: bool = False) -> list[str]:
+    if values is None:
+        return []
+    if not isinstance(values, list):
+        values = [values]
+    result = []
+    for value in values:
+        text = str(value).strip()
+        if not text:
+            continue
+        if upper:
+            text = text.upper()
+        if lower:
+            text = text.lower()
+        result.append(text)
+    return result
 
 
 def load_config(path: str | Path) -> BotConfig:
@@ -75,6 +126,45 @@ def load_config(path: str | Path) -> BotConfig:
         max_rsi_for_entry=float(strategy_data.get("max_rsi_for_entry", 70.0)),
         stop_loss_pct=float(strategy_data.get("stop_loss_pct", 0.07)),
         take_profit_pct=float(strategy_data.get("take_profit_pct", 0.15)),
+    )
+
+    selection_data = data.get("selection", {})
+    selection_mode = str(selection_data.get("mode", "ranked")).strip().lower()
+    if selection_mode not in {"ranked", "sequential"}:
+        raise ValueError("selection.mode must be either 'ranked' or 'sequential'")
+    selection = SelectionConfig(
+        mode=selection_mode,
+        preview_top=max(0, int(selection_data.get("preview_top", 10))),
+    )
+
+    screener_data = data.get("screener", {})
+    screener_source = str(screener_data.get("source", "curated")).strip().lower()
+    if screener_source not in {"curated", "mcp", "hybrid"}:
+        raise ValueError("screener.source must be one of 'curated', 'mcp', or 'hybrid'")
+    screener = ScreenerConfig(
+        enabled=bool(screener_data.get("enabled", False)),
+        source=screener_source,
+        universes=_str_list(screener_data.get("universes", ["watchlist"]), lower=True) or ["watchlist"],
+        exchanges=_str_list(screener_data.get("exchanges", ["NASDAQ", "NYSE"]), upper=True) or ["NASDAQ", "NYSE"],
+        dynamic_sources=_str_list(
+            screener_data.get(
+                "dynamic_sources",
+                ["rating_strong_buy", "rating_buy", "volume_breakout", "smart_volume", "top_gainers"],
+            ),
+            lower=True,
+        )
+        or ["rating_strong_buy", "rating_buy", "volume_breakout", "smart_volume", "top_gainers"],
+        per_source_limit=max(1, int(screener_data.get("per_source_limit", 50))),
+        max_candidates=max(1, int(screener_data.get("max_candidates", 100))),
+        exclude_symbols=_str_list(screener_data.get("exclude_symbols", []), upper=True),
+    )
+
+    optimizer_data = data.get("optimizer", {})
+    optimizer = OptimizerConfig(
+        enabled=bool(optimizer_data.get("enabled", True)),
+        cash_reserve_pct=max(0.0, min(0.95, float(optimizer_data.get("cash_reserve_pct", 0.05)))),
+        max_new_buys_per_scan=max(0, int(optimizer_data.get("max_new_buys_per_scan", 3))),
+        min_position_notional=max(0.0, float(optimizer_data.get("min_position_notional", 25.0))),
     )
 
     provider_data = data.get("provider", {})
@@ -114,6 +204,9 @@ def load_config(path: str | Path) -> BotConfig:
         slippage_pct=float(data.get("slippage_pct", 0.02)),
         execution=execution,
         strategy=strategy,
+        selection=selection,
+        screener=screener,
+        optimizer=optimizer,
         provider=provider,
         broker=broker,
         watchlist=watchlist,

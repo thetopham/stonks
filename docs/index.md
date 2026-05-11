@@ -6,7 +6,8 @@ Start here if you are trying to understand what the autonomous paper trader is d
 
 1. [Strategy and scoring](strategy-and-scoring.md) — exact score formula, BUY/HOLD/SELL gates, exits, sizing, and current limitations.
 2. [Operator descriptions](operator-descriptions.md) — plain-English descriptions of dashboard fields, CLI output, config knobs, ledger tables, and service behavior.
-3. [README](../README.md) — quick start, service commands, dashboard command, and safety boundary.
+3. [Roadmap and future TODOs](roadmap.md) — implemented ranked screening/optimizer guardrails plus remaining backtesting, sentiment/news, and dashboard explainability work.
+4. [README](../README.md) — quick start, service commands, dashboard command, and safety boundary.
 
 ## Safety boundary
 

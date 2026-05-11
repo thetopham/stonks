@@ -19,6 +19,30 @@ max_rsi_for_entry = 70
 stop_loss_pct = 0.07
 take_profit_pct = 0.15
 
+[selection]
+# Ranked mode scores the whole universe first, processes exits, then buys the best candidates.
+mode = "ranked"
+preview_top = 10
+
+[screener]
+# curated = watchlist/curated baskets only.
+# mcp = use TradingView MCP screeners across exchanges, then deep-score the best candidates.
+# hybrid = MCP screeners plus curated local baskets.
+enabled = false
+source = "curated"
+universes = ["watchlist", "etf_core", "nasdaq_mega", "nyse_mega", "ai_infra"]
+exchanges = ["NASDAQ", "NYSE"]
+dynamic_sources = ["rating_strong_buy", "rating_buy", "volume_breakout", "smart_volume", "top_gainers"]
+per_source_limit = 50
+max_candidates = 100
+exclude_symbols = []
+
+[optimizer]
+enabled = true
+cash_reserve_pct = 0.05
+max_new_buys_per_scan = 3
+min_position_notional = 25
+
 [provider]
 command = "/home/matt/.local/bin/uvx"
 args = ["--from", "tradingview-mcp-server", "tradingview-mcp"]

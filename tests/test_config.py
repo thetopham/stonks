@@ -157,3 +157,57 @@ exchange = "NASDAQ"
         assert "paper_only=true" in str(exc)
     else:
         raise AssertionError("expected non-paper broker order submission to be rejected")
+
+
+def test_load_config_reads_ranked_selection_screener_and_optimizer(tmp_path):
+    cfg_path = tmp_path / "optimizer.toml"
+    cfg_path.write_text(
+        """
+ledger_path = "ledger.sqlite3"
+
+[execution]
+dry_run = true
+live_trading_enabled = false
+
+[selection]
+mode = "ranked"
+preview_top = 7
+
+[screener]
+enabled = true
+source = "mcp"
+universes = ["watchlist", "etf_core"]
+exchanges = ["NASDAQ", "NYSE"]
+dynamic_sources = ["rating_strong_buy", "volume_breakout"]
+per_source_limit = 40
+max_candidates = 25
+exclude_symbols = ["SPY"]
+
+[optimizer]
+enabled = true
+cash_reserve_pct = 0.20
+max_new_buys_per_scan = 2
+min_position_notional = 100
+
+[[watchlist]]
+symbol = "AAPL"
+exchange = "NASDAQ"
+"""
+    )
+
+    config = load_config(cfg_path)
+
+    assert config.selection.mode == "ranked"
+    assert config.selection.preview_top == 7
+    assert config.screener.enabled is True
+    assert config.screener.source == "mcp"
+    assert config.screener.universes == ["watchlist", "etf_core"]
+    assert config.screener.exchanges == ["NASDAQ", "NYSE"]
+    assert config.screener.dynamic_sources == ["rating_strong_buy", "volume_breakout"]
+    assert config.screener.per_source_limit == 40
+    assert config.screener.max_candidates == 25
+    assert config.screener.exclude_symbols == ["SPY"]
+    assert config.optimizer.enabled is True
+    assert config.optimizer.cash_reserve_pct == 0.20
+    assert config.optimizer.max_new_buys_per_scan == 2
+    assert config.optimizer.min_position_notional == 100

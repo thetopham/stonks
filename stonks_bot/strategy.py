@@ -15,6 +15,7 @@ class Signal:
     price: float
     reasons: list[str] = field(default_factory=list)
     raw: dict[str, Any] = field(default_factory=dict)
+    rsi: float | None = None
 
 
 def _technical(analysis: dict[str, Any]) -> dict[str, Any]:
@@ -130,19 +131,19 @@ def generate_signal(
     exchange = exchange.upper()
 
     if price <= 0:
-        return Signal(symbol, exchange, "HOLD", score, price, ["No usable current price"], analysis)
+        return Signal(symbol, exchange, "HOLD", score, price, ["No usable current price"], analysis, rsi)
 
     if position is not None:
         if price <= position.entry_price * (1 - stop_loss_pct):
-            return Signal(symbol, exchange, "SELL", score, price, [f"Stop loss hit: {price:.2f} <= {position.entry_price * (1 - stop_loss_pct):.2f}"] + reasons, analysis)
+            return Signal(symbol, exchange, "SELL", score, price, [f"Stop loss hit: {price:.2f} <= {position.entry_price * (1 - stop_loss_pct):.2f}"] + reasons, analysis, rsi)
         if price >= position.entry_price * (1 + take_profit_pct):
-            return Signal(symbol, exchange, "SELL", score, price, [f"Take profit hit: {price:.2f} >= {position.entry_price * (1 + take_profit_pct):.2f}"] + reasons, analysis)
+            return Signal(symbol, exchange, "SELL", score, price, [f"Take profit hit: {price:.2f} >= {position.entry_price * (1 + take_profit_pct):.2f}"] + reasons, analysis, rsi)
         if score <= exit_score:
-            return Signal(symbol, exchange, "SELL", score, price, [f"Score {score:.1f} <= exit score {exit_score:.1f}"] + reasons, analysis)
-        return Signal(symbol, exchange, "HOLD", score, price, ["Position remains within risk rules"] + reasons, analysis)
+            return Signal(symbol, exchange, "SELL", score, price, [f"Score {score:.1f} <= exit score {exit_score:.1f}"] + reasons, analysis, rsi)
+        return Signal(symbol, exchange, "HOLD", score, price, ["Position remains within risk rules"] + reasons, analysis, rsi)
 
     if rsi is not None and rsi > max_rsi_for_entry:
-        return Signal(symbol, exchange, "HOLD", score, price, [f"RSI {rsi:.1f} above entry cap {max_rsi_for_entry:.1f}"] + reasons, analysis)
+        return Signal(symbol, exchange, "HOLD", score, price, [f"RSI {rsi:.1f} above entry cap {max_rsi_for_entry:.1f}"] + reasons, analysis, rsi)
     if score >= entry_score:
-        return Signal(symbol, exchange, "BUY", score, price, [f"Score {score:.1f} >= entry score {entry_score:.1f}"] + reasons, analysis)
-    return Signal(symbol, exchange, "HOLD", score, price, [f"Score {score:.1f} below entry score {entry_score:.1f}"] + reasons, analysis)
+        return Signal(symbol, exchange, "BUY", score, price, [f"Score {score:.1f} >= entry score {entry_score:.1f}"] + reasons, analysis, rsi)
+    return Signal(symbol, exchange, "HOLD", score, price, [f"Score {score:.1f} below entry score {entry_score:.1f}"] + reasons, analysis, rsi)

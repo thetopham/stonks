@@ -6,15 +6,16 @@ Safety boundary: paper trading only. By default, the trading loop records local 
 
 ## Strategy summary
 
-The bot scans each watchlist symbol in order, asks TradingView MCP for `combined_analysis`, converts that response into a 0-100 technical score, and records simulated paper BUY/SELL fills in SQLite.
+The bot builds a candidate universe, asks TradingView MCP for `combined_analysis`, converts every response into a 0-100 technical score, ranks candidates, then records simulated paper BUY/SELL fills in SQLite. With `screener.source = "mcp"`, the universe starts with dynamic TradingView MCP scanner output across configured exchanges, so you do not need to manually add every possible symbol to the config; the watchlist is only a guaranteed seed/fallback.
 
 Default behavior:
 
 - Starts each symbol at score 50.
 - Adds/subtracts points for trend bias, RSI, MACD crossover, SMA/EMA signals, Bollinger Band position, and sentiment.
-- Buys only when score is at least `entry_score`, RSI is not above `max_rsi_for_entry`, price is usable, cash is available, and the max-open-position ceiling is not reached.
+- Buys only when score is at least `entry_score`, RSI is not above `max_rsi_for_entry`, price is usable, cash is available, and optimizer caps allow the trade.
 - Sells open paper positions on stop loss, take profit, or score falling to `exit_score` or lower.
-- Allocates `max_position_pct` of remaining paper cash to each accepted BUY.
+- Scores the full universe before acting, processes SELL exits first, then buys the highest ranked candidates.
+- Allocates up to `max_position_pct` of remaining paper cash to each accepted BUY while preserving the optimizer cash reserve.
 
 See [docs/strategy-and-scoring.md](docs/strategy-and-scoring.md) for the exact score table and gates.
 
@@ -23,6 +24,7 @@ See [docs/strategy-and-scoring.md](docs/strategy-and-scoring.md) for the exact s
 - [docs/index.md](docs/index.md) — docs map.
 - [docs/strategy-and-scoring.md](docs/strategy-and-scoring.md) — exact strategy, scoring, entry/exit, sizing, and limitations.
 - [docs/operator-descriptions.md](docs/operator-descriptions.md) — dashboard, CLI, config, ledger, and service field descriptions.
+- [docs/roadmap.md](docs/roadmap.md) — future TODOs for ranked screening, portfolio optimization, backtesting, sentiment/news, and dashboard explainability.
 
 ## Quick start
 
@@ -50,7 +52,9 @@ timeframe = "1D"
 
 ## Commands
 
-`stonks-paper run-once --config config.paper.toml` scans the watchlist one time. With `broker.submit_orders=false`, it creates simulated local paper BUY/SELL fills. With `broker.submit_orders=true`, it first checks that the Alpaca market is open, submits Alpaca paper market orders, and records only confirmed filled paper orders in SQLite.
+`stonks-paper screen --config config.paper.toml` runs the read-only ranked screener. In `screener.source = "mcp"` mode it first asks TradingView MCP scanner tools for broad-market candidates across configured exchanges, then deep-scores the capped candidate set and prints the sorted list without broker orders or ledger trades.
+
+`stonks-paper run-once --config config.paper.toml` scans the configured universe one time. With `broker.submit_orders=false`, it creates simulated local paper BUY/SELL fills. With `broker.submit_orders=true`, it first checks that the Alpaca market is open, submits Alpaca paper market orders, and records only confirmed filled paper orders in SQLite.
 
 `stonks-paper status --config config.paper.toml` reads only the local ledger and prints cash, open paper positions, and realized PnL.
 

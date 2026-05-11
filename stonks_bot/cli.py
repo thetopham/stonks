@@ -18,7 +18,7 @@ from .config import load_config
 from .ledger import PaperLedger
 from .dashboard import serve_dashboard
 from .mcp_client import TradingViewMCPProvider
-from .runner import format_status, run_once
+from .runner import format_status, run_once, screen_once
 
 
 def _copy_example(destination: Path) -> None:
@@ -40,6 +40,16 @@ async def _run_once(config_path: Path) -> str:
     ledger = PaperLedger(config.ledger_path, starting_cash=config.starting_cash)
     async with TradingViewMCPProvider(config.provider.command, config.provider.args, config.provider.timeframe) as provider:
         return await run_once(config, ledger, provider, broker=broker)
+
+
+async def _screen_once(config_path: Path) -> str:
+    config = load_config(config_path)
+    ledger = PaperLedger(config.ledger_path, starting_cash=config.starting_cash)
+    try:
+        async with TradingViewMCPProvider(config.provider.command, config.provider.args, config.provider.timeframe) as provider:
+            return await screen_once(config, ledger, provider)
+    finally:
+        ledger.close()
 
 
 async def _watch(config_path: Path) -> None:
@@ -103,6 +113,9 @@ def main(argv: list[str] | None = None) -> int:
     run = sub.add_parser("run-once", help="scan watchlist once and apply paper trades")
     run.add_argument("--config", type=Path, default=Path("config.paper.toml"))
 
+    screen = sub.add_parser("screen", help="read-only ranked screener; scores candidates without broker orders or ledger trades")
+    screen.add_argument("--config", type=Path, default=Path("config.paper.toml"))
+
     status = sub.add_parser("status", help="print local paper ledger status without network calls")
     status.add_argument("--config", type=Path, default=Path("config.paper.toml"))
 
@@ -138,6 +151,10 @@ def main(argv: list[str] | None = None) -> int:
         except AlpacaConfigError as exc:
             print(f"Alpaca paper broker failed: {exc}", file=sys.stderr)
             return 2
+        return 0
+
+    if args.command == "screen":
+        print(asyncio.run(_screen_once(args.config)))
         return 0
 
     if args.command == "status":

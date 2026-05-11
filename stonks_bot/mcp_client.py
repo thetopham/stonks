@@ -6,12 +6,16 @@ from typing import Any
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
+from .models import WatchItem
+from .screener import normalize_watch_item
+
 
 class TradingViewMCPProvider:
     def __init__(self, command: str, args: list[str], timeframe: str = "1D"):
         self.command = command
         self.args = args
         self.timeframe = timeframe
+        self.last_discovery_notes: list[str] = []
         self._stdio_context = None
         self._session_context = None
         self._session: ClientSession | None = None
@@ -47,6 +51,102 @@ class TradingViewMCPProvider:
             return json.loads(raw)
         except json.JSONDecodeError:
             return {"text": raw}
+
+    @staticmethod
+    def _tool_call_for_source(source: str, exchange: str, timeframe: str, limit: int) -> tuple[str, dict[str, Any]] | None:
+        source = source.strip().lower()
+        if source == "top_gainers":
+            return "top_gainers", {"exchange": exchange, "timeframe": timeframe, "limit": limit}
+        if source == "top_losers":
+            return "top_losers", {"exchange": exchange, "timeframe": timeframe, "limit": limit}
+        if source == "bollinger_squeeze":
+            return "bollinger_scan", {"exchange": exchange, "timeframe": timeframe, "bbw_threshold": 0.04, "limit": limit}
+        if source == "rating_strong_buy":
+            return "rating_filter", {"exchange": exchange, "timeframe": timeframe, "rating": 3, "limit": limit}
+        if source == "rating_buy":
+            return "rating_filter", {"exchange": exchange, "timeframe": timeframe, "rating": 2, "limit": limit}
+        if source == "rating_weak_buy":
+            return "rating_filter", {"exchange": exchange, "timeframe": timeframe, "rating": 1, "limit": limit}
+        if source == "volume_breakout":
+            return "volume_breakout_scanner", {
+                "exchange": exchange,
+                "timeframe": timeframe,
+                "volume_multiplier": 2.0,
+                "price_change_min": 3.0,
+                "limit": limit,
+            }
+        if source == "smart_volume":
+            return "smart_volume_scanner", {
+                "exchange": exchange,
+                "min_volume_ratio": 2.0,
+                "min_price_change": 2.0,
+                "rsi_range": "any",
+                "limit": limit,
+            }
+        return None
+
+    @classmethod
+    def _extract_watch_items(cls, payload: Any, fallback_exchange: str) -> list[WatchItem]:
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except json.JSONDecodeError:
+                item = normalize_watch_item(payload, fallback_exchange)
+                return [item] if item is not None else []
+
+        if isinstance(payload, dict):
+            for key in ("result", "results", "data", "rows", "stocks", "coins"):
+                if key in payload:
+                    return cls._extract_watch_items(payload[key], fallback_exchange)
+            raw_symbol = payload.get("symbol") or payload.get("ticker")
+            if raw_symbol:
+                item = normalize_watch_item(str(raw_symbol), str(payload.get("exchange") or fallback_exchange))
+                return [item] if item is not None else []
+            return []
+
+        if isinstance(payload, list):
+            items: list[WatchItem] = []
+            seen: set[str] = set()
+            for entry in payload:
+                for item in cls._extract_watch_items(entry, fallback_exchange):
+                    if item.symbol not in seen:
+                        seen.add(item.symbol)
+                        items.append(item)
+            return items
+
+        return []
+
+    async def discover_candidates(
+        self,
+        exchanges: list[str],
+        timeframe: str,
+        sources: list[str],
+        per_source_limit: int,
+    ) -> list[WatchItem]:
+        """Use MCP screeners to discover broad-market candidates before deep scoring."""
+        self.last_discovery_notes = []
+        discovered: list[WatchItem] = []
+        seen: set[str] = set()
+        for exchange in exchanges:
+            exchange = exchange.upper()
+            for source in sources:
+                tool_call = self._tool_call_for_source(source, exchange, timeframe or self.timeframe, per_source_limit)
+                if tool_call is None:
+                    self.last_discovery_notes.append(f"{exchange}:{source}=unknown-source")
+                    continue
+                tool_name, arguments = tool_call
+                try:
+                    payload = await self.call_tool(tool_name, arguments)
+                except Exception as exc:
+                    self.last_discovery_notes.append(f"{exchange}:{source}=failed:{type(exc).__name__}")
+                    continue
+                items = self._extract_watch_items(payload, exchange)
+                self.last_discovery_notes.append(f"{exchange}:{source}={len(items)}")
+                for item in items:
+                    if item.symbol not in seen:
+                        seen.add(item.symbol)
+                        discovered.append(item)
+        return discovered
 
     async def combined_analysis(self, symbol: str, exchange: str, timeframe: str) -> dict[str, Any]:
         try:

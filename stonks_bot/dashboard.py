@@ -126,6 +126,17 @@ def collect_dashboard_data(config: BotConfig, ledger: PaperLedger, service_names
             "stop_loss_pct": config.strategy.stop_loss_pct,
             "take_profit_pct": config.strategy.take_profit_pct,
             "max_position_pct": config.max_position_pct,
+            "selection_mode": config.selection.mode,
+            "screener_enabled": config.screener.enabled,
+            "screener_source": config.screener.source,
+            "screener_universes": config.screener.universes,
+            "screener_exchanges": config.screener.exchanges,
+            "screener_dynamic_sources": config.screener.dynamic_sources,
+            "screener_per_source_limit": config.screener.per_source_limit,
+            "screener_max_candidates": config.screener.max_candidates,
+            "optimizer_enabled": config.optimizer.enabled,
+            "cash_reserve_pct": config.optimizer.cash_reserve_pct,
+            "max_new_buys_per_scan": config.optimizer.max_new_buys_per_scan,
             "scan_interval_seconds": config.execution.scan_interval_seconds,
             "timeframe": config.provider.timeframe,
         },
@@ -178,6 +189,9 @@ def render_dashboard_html(data: dict[str, Any], api_path: str = "/api/dashboard"
     positions_html = "".join(_position_card(position) for position in data["positions"]) or '<article class="card"><h3>No open paper positions</h3><p class="muted">The autonomous loop is watching for qualifying entries.</p></article>'
     trades_html = "".join(_trade_row(trade) for trade in data["recent_trades"]) or '<tr><td colspan="6" class="muted">No paper trades recorded yet.</td></tr>'
     watchlist = ", ".join(f"{escape(item['symbol'])}:{escape(item['exchange'])}" for item in data["watchlist"])
+    universe_text = ", ".join(escape(str(item)) for item in data["strategy"].get("screener_universes", [])) or "watchlist"
+    exchange_text = ", ".join(escape(str(item)) for item in data["strategy"].get("screener_exchanges", [])) or "configured"
+    source_text = escape(data["strategy"].get("screener_source", "curated"))
     embedded = json.dumps(data, sort_keys=True)
 
     return f"""<!doctype html>
@@ -244,6 +258,9 @@ def render_dashboard_html(data: dict[str, Any], api_path: str = "/api/dashboard"
   <section class="grid">
     <article class="card"><div class="label">Entry / Exit</div><div class="metric">{data['strategy']['entry_score']:.0f} / {data['strategy']['exit_score']:.0f}</div><small>Score thresholds</small></article>
     <article class="card"><div class="label">Risk</div><div class="metric">{data['strategy']['max_position_pct'] * 100:.0f}%</div><small>Max per-position allocation</small></article>
+    <article class="card"><div class="label">Optimizer</div><div class="metric">{data['strategy']['max_new_buys_per_scan']}</div><small>Max new buys/scan · reserve {data['strategy']['cash_reserve_pct'] * 100:.0f}%</small></article>
+    <article class="card"><div class="label">Selection</div><div class="metric">{escape(data['strategy']['selection_mode'])}</div><small>{'screener on' if data['strategy']['screener_enabled'] else 'watchlist only'} · {source_text} · cap {data['strategy']['screener_max_candidates']}</small></article>
+    <article class="card"><div class="label">Universe</div><div class="metric">{exchange_text}</div><small>{universe_text}</small></article>
     <article class="card"><div class="label">Stops</div><div class="metric">-{data['strategy']['stop_loss_pct'] * 100:.0f}% / +{data['strategy']['take_profit_pct'] * 100:.0f}%</div><small>Stop loss / take profit</small></article>
     <article class="card"><div class="label">Cadence</div><div class="metric">{int(data['strategy']['scan_interval_seconds'] / 60)}m</div><small>{escape(data['strategy']['timeframe'])} analysis timeframe</small></article>
   </section>
