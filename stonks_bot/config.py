@@ -73,6 +73,8 @@ class BrokerConfig:
 @dataclass(slots=True)
 class OptionsConfig:
     enabled: bool = False
+    auto_trade: bool = False
+    submit_orders: bool = False
     underlying_symbols: list[str] = field(
         default_factory=lambda: ["SPY", "QQQ", "IWM", "AAPL", "MSFT", "NVDA", "AMD", "TSLA", "META", "AMZN", "GOOGL"]
     )
@@ -217,6 +219,8 @@ def load_config(path: str | Path) -> BotConfig:
     options_data = data.get("options", {})
     options = OptionsConfig(
         enabled=bool(options_data.get("enabled", False)),
+        auto_trade=bool(options_data.get("auto_trade", False)),
+        submit_orders=bool(options_data.get("submit_orders", False)),
         underlying_symbols=_str_list(
             options_data.get("underlying_symbols", OptionsConfig().underlying_symbols), upper=True
         )
@@ -245,6 +249,13 @@ def load_config(path: str | Path) -> BotConfig:
         raise ValueError("options must allow calls, puts, or both")
     if options.quote_feed not in {"indicative", "opra"}:
         raise ValueError("options.quote_feed must be 'indicative' or 'opra'")
+    if options.auto_trade and not options.enabled:
+        raise ValueError("options.auto_trade=true requires options.enabled=true")
+    if options.submit_orders:
+        if not options.enabled:
+            raise ValueError("options.submit_orders=true requires options.enabled=true")
+        if not broker.submit_orders or broker.name != "alpaca":
+            raise ValueError("options broker order submission requires [broker].name='alpaca' and [broker].submit_orders=true")
 
     watchlist = [
         WatchItem(symbol=str(item["symbol"]).upper(), exchange=str(item.get("exchange", "NASDAQ")).upper())

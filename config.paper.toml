@@ -42,9 +42,13 @@ max_new_buys_per_scan = 10
 min_position_notional = 25
 
 [options]
-# Defined-risk options overlay. These commands never submit option orders; they
-# read Alpaca contracts/quotes and write only local paper option fills.
+# Defined-risk options overlay. The background bot will scan automatically and, when a
+# qualifying setup appears, sync options cash from Alpaca paper options buying power, then submit
+# long-call/long-put limit orders to the Alpaca paper endpoint only. Local SQLite remains
+# the source of truth for dashboard/reporting.
 enabled = true
+auto_trade = true
+submit_orders = true
 underlying_symbols = ["SPY", "QQQ", "IWM", "AAPL", "MSFT", "NVDA", "AMD", "TSLA", "META", "AMZN", "GOOGL"]
 min_dte = 30
 max_dte = 60

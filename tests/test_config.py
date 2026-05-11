@@ -159,6 +159,67 @@ exchange = "NASDAQ"
         raise AssertionError("expected non-paper broker order submission to be rejected")
 
 
+def test_options_order_submission_requires_alpaca_paper_broker_submission(tmp_path):
+    cfg_path = tmp_path / "bad-options-broker.toml"
+    cfg_path.write_text(
+        """
+ledger_path = "ledger.sqlite3"
+
+[execution]
+dry_run = true
+live_trading_enabled = false
+
+[broker]
+name = "alpaca"
+paper_only = true
+submit_orders = false
+
+[options]
+enabled = true
+submit_orders = true
+
+[[watchlist]]
+symbol = "AAPL"
+exchange = "NASDAQ"
+"""
+    )
+
+    try:
+        load_config(cfg_path)
+    except ValueError as exc:
+        assert "options broker order submission requires" in str(exc)
+    else:
+        raise AssertionError("expected options submission without broker submission to be rejected")
+
+
+def test_options_auto_trade_requires_enabled_overlay(tmp_path):
+    cfg_path = tmp_path / "bad-options-auto.toml"
+    cfg_path.write_text(
+        """
+ledger_path = "ledger.sqlite3"
+
+[execution]
+dry_run = true
+live_trading_enabled = false
+
+[options]
+enabled = false
+auto_trade = true
+
+[[watchlist]]
+symbol = "AAPL"
+exchange = "NASDAQ"
+"""
+    )
+
+    try:
+        load_config(cfg_path)
+    except ValueError as exc:
+        assert "options.auto_trade=true requires" in str(exc)
+    else:
+        raise AssertionError("expected disabled options auto-trade to be rejected")
+
+
 def test_load_config_reads_ranked_selection_screener_and_optimizer(tmp_path):
     cfg_path = tmp_path / "optimizer.toml"
     cfg_path.write_text(

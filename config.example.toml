@@ -44,11 +44,17 @@ max_new_buys_per_scan = 3
 min_position_notional = 25
 
 [options]
-# Defined-risk options overlay. Commands using this section are paper/read-only only:
-#   stonks-paper options-scan   # read-only chain scan
-#   stonks-paper options-paper  # local options paper ledger, no broker option orders
-#   stonks-paper options-status # local ledger status only
+# Defined-risk options overlay.
+#   options-scan   = read-only chain scan
+#   options-paper     = local paper options loop; syncs cash from Alpaca paper options
+#                       buying power and submits Alpaca paper option orders only when
+#                       broker.submit_orders=true and options.submit_orders=true
+#   options-sync-cash = read-only options buying-power sync for dashboard/risk basis
+#   options-status    = local ledger status only
+# The watch service runs options-paper automatically only when auto_trade=true.
 enabled = true
+auto_trade = false
+submit_orders = false
 underlying_symbols = ["SPY", "QQQ", "IWM", "AAPL", "MSFT", "NVDA", "AMD", "TSLA", "META", "AMZN", "GOOGL"]
 min_dte = 30
 max_dte = 60

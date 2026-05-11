@@ -23,6 +23,7 @@ from stonks_bot.options import (
     format_options_status,
     options_paper_once,
     options_scan_once,
+    sync_options_cash_from_account,
 )
 
 
@@ -75,7 +76,36 @@ class FakeOptionsClient:
         return {symbol: self.quotes_by_symbol[symbol] for symbol in symbols if symbol in self.quotes_by_symbol}
 
 
-def _config(tmp_path, *, options=None):
+class FakeBrokerFill:
+    def __init__(self, order_id, symbol, side, quantity, price):
+        self.order_id = order_id
+        self.symbol = symbol
+        self.side = side
+        self.status = "filled"
+        self.quantity = quantity
+        self.price = price
+        self.notional = quantity * price * 100
+
+
+class FakeOptionsBroker:
+    def __init__(self, *, market_open=True):
+        self.market_open = market_open
+        self.buy_orders = []
+        self.sell_orders = []
+
+    def market_is_open(self):
+        return self.market_open, "market open" if self.market_open else "market closed"
+
+    def submit_option_buy_to_open(self, symbol, *, contracts, limit_price):
+        self.buy_orders.append((symbol, contracts, limit_price))
+        return FakeBrokerFill("buy-order-1", symbol, "buy", contracts, limit_price - 0.05)
+
+    def submit_option_sell_to_close(self, symbol, *, contracts, limit_price):
+        self.sell_orders.append((symbol, contracts, limit_price))
+        return FakeBrokerFill("sell-order-1", symbol, "sell", contracts, limit_price)
+
+
+def _config(tmp_path, *, options=None, broker=None):
     return BotConfig(
         ledger_path=tmp_path / "ledger.sqlite3",
         starting_cash=10_000,
@@ -89,7 +119,7 @@ def _config(tmp_path, *, options=None):
         screener=ScreenerConfig(enabled=False),
         optimizer=OptimizerConfig(enabled=True, cash_reserve_pct=0.05, max_new_buys_per_scan=3, min_position_notional=25.0),
         provider=ProviderConfig(command="fake", args=[], timeframe="1D"),
-        broker=BrokerConfig(name="alpaca", submit_orders=False, paper_only=True),
+        broker=broker or BrokerConfig(name="alpaca", submit_orders=False, paper_only=True),
         options=options or OptionsConfig(enabled=True, underlying_symbols=["AAPL"], max_open_positions=2),
         watchlist=[WatchItem(symbol="AAPL", exchange="NASDAQ")],
     )
@@ -120,6 +150,8 @@ live_trading_enabled = false
 
 [options]
 enabled = true
+auto_trade = true
+submit_orders = false
 underlying_symbols = ["SPY", "AAPL"]
 min_dte = 30
 max_dte = 60
@@ -146,6 +178,8 @@ exchange = "NASDAQ"
     config = load_config(cfg_path)
 
     assert config.options.enabled is True
+    assert config.options.auto_trade is True
+    assert config.options.submit_orders is False
     assert config.options.underlying_symbols == ["SPY", "AAPL"]
     assert config.options.min_dte == 30
     assert config.options.max_dte == 60
@@ -238,6 +272,96 @@ def test_options_paper_opens_local_defined_risk_position_without_broker_orders(t
     assert options_ledger.cash == 9900.0
 
 
+def test_options_ledger_can_sync_cash_to_alpaca_buying_power(tmp_path):
+    config = _config(tmp_path)
+    options_ledger = OptionsPaperLedger(config.ledger_path, starting_cash=config.starting_cash)
+
+    options_ledger.sync_cash(61_164.94, source="alpaca_buying_power")
+
+    assert options_ledger.cash == 61_164.94
+    assert options_ledger.cash_source == "alpaca_buying_power"
+    status = format_options_status(config, options_ledger)
+    assert "cash_source=alpaca_buying_power" in status
+
+
+def test_sync_options_cash_prefers_alpaca_options_buying_power(tmp_path):
+    config = _config(tmp_path)
+    options_ledger = OptionsPaperLedger(config.ledger_path, starting_cash=config.starting_cash)
+
+    synced_cash = sync_options_cash_from_account(
+        options_ledger,
+        {
+            "buying_power": "126337.95",
+            "non_marginable_buying_power": "61168.55",
+            "options_buying_power": "63168.55",
+        },
+    )
+
+    assert synced_cash == 63_168.55
+    assert options_ledger.cash == 63_168.55
+    assert options_ledger.cash_source == "alpaca_options_buying_power"
+
+
+def test_options_paper_uses_current_options_cash_for_risk_cap(tmp_path):
+    config = _config(tmp_path, options=OptionsConfig(enabled=True, underlying_symbols=["AAPL"], max_trade_risk_pct=0.01, max_open_positions=2))
+    ledger = PaperLedger(config.ledger_path, starting_cash=config.starting_cash)
+    options_ledger = OptionsPaperLedger(config.ledger_path, starting_cash=config.starting_cash)
+    options_ledger.sync_cash(5_000.0, source="alpaca_buying_power")
+    analysis = FakeAnalysisProvider({"AAPL": _analysis(price=100)})
+    option_client = FakeOptionsClient(
+        {(("AAPL",), "call"): [_contract("AAPL260620C00105000", expiration="2026-06-20", strike=105)]},
+        {"AAPL260620C00105000": OptionQuote(symbol="AAPL260620C00105000", bid=0.95, ask=1.00)},
+    )
+
+    report = asyncio.run(options_paper_once(config, ledger, options_ledger, analysis, option_client, today=date(2026, 5, 11)))
+
+    assert "risk_cap=50.00" in report
+    assert "PAPER OPTIONS BUY_TO_OPEN" not in report
+    assert options_ledger.list_positions() == []
+    assert options_ledger.cash == 5_000.0
+
+
+def test_options_paper_submits_alpaca_paper_buy_order_when_enabled(tmp_path):
+    options = OptionsConfig(enabled=True, submit_orders=True, underlying_symbols=["AAPL"], max_trade_risk_pct=0.01, max_open_positions=2)
+    broker_config = BrokerConfig(name="alpaca", submit_orders=True, paper_only=True)
+    config = _config(tmp_path, options=options, broker=broker_config)
+    ledger = PaperLedger(config.ledger_path, starting_cash=config.starting_cash)
+    options_ledger = OptionsPaperLedger(config.ledger_path, starting_cash=config.starting_cash)
+    analysis = FakeAnalysisProvider({"AAPL": _analysis(price=100)})
+    option_client = FakeOptionsClient(
+        {(('AAPL',), "call"): [_contract("AAPL260620C00105000", expiration="2026-06-20", strike=105)]},
+        {"AAPL260620C00105000": OptionQuote(symbol="AAPL260620C00105000", bid=0.95, ask=1.00)},
+    )
+    broker = FakeOptionsBroker()
+
+    report = asyncio.run(options_paper_once(config, ledger, options_ledger, analysis, option_client, broker=broker, today=date(2026, 5, 11)))
+
+    assert "Boundary: ALPACA PAPER OPTIONS ORDERS ENABLED" in report
+    assert "ALPACA PAPER OPTIONS BUY_TO_OPEN AAPL" in report
+    assert broker.buy_orders == [("AAPL260620C00105000", 1, 1.00)]
+    position = options_ledger.get_position("AAPL260620C00105000")
+    assert position is not None
+    assert position.entry_price == 0.95
+    assert position.entry_debit == 95.0
+    assert position.metadata["broker_order_id"] == "buy-order-1"
+    assert options_ledger.cash == 9905.0
+
+
+def test_options_paper_submission_mode_requires_broker_executor(tmp_path):
+    options = OptionsConfig(enabled=True, submit_orders=True, underlying_symbols=["AAPL"], max_trade_risk_pct=0.01, max_open_positions=2)
+    broker_config = BrokerConfig(name="alpaca", submit_orders=True, paper_only=True)
+    config = _config(tmp_path, options=options, broker=broker_config)
+    ledger = PaperLedger(config.ledger_path, starting_cash=config.starting_cash)
+    options_ledger = OptionsPaperLedger(config.ledger_path, starting_cash=config.starting_cash)
+
+    try:
+        asyncio.run(options_paper_once(config, ledger, options_ledger, FakeAnalysisProvider({"AAPL": _analysis(price=100)}), FakeOptionsClient({}, {}), today=date(2026, 5, 11)))
+    except ValueError as exc:
+        assert "no Alpaca paper options broker executor" in str(exc)
+    else:
+        raise AssertionError("expected options broker executor to be required")
+
+
 def test_options_paper_closes_position_on_profit_target(tmp_path):
     config = _config(tmp_path, options=OptionsConfig(enabled=True, underlying_symbols=["AAPL"], take_profit_pct=0.50, max_open_positions=2))
     options_ledger = OptionsPaperLedger(config.ledger_path, starting_cash=config.starting_cash)
@@ -261,6 +385,36 @@ def test_options_paper_closes_position_on_profit_target(tmp_path):
     assert options_ledger.get_position("AAPL260620C00105000") is None
     assert options_ledger.cash == 10055.0
     assert "realized_pnl=55.00" in report
+
+
+def test_options_paper_submits_alpaca_paper_sell_order_on_exit_when_enabled(tmp_path):
+    options = OptionsConfig(enabled=True, submit_orders=True, underlying_symbols=["AAPL"], take_profit_pct=0.50, max_open_positions=2)
+    broker_config = BrokerConfig(name="alpaca", submit_orders=True, paper_only=True)
+    config = _config(tmp_path, options=options, broker=broker_config)
+    options_ledger = OptionsPaperLedger(config.ledger_path, starting_cash=config.starting_cash)
+    candidate_contract = _contract("AAPL260620C00105000", expiration="2026-06-20", strike=105)
+    candidates = filter_option_candidates(
+        "AAPL",
+        "call",
+        underlying_price=100,
+        signal_score=80,
+        contracts=[candidate_contract],
+        quotes={"AAPL260620C00105000": OptionQuote(symbol="AAPL260620C00105000", bid=0.95, ask=1.00)},
+        config=config.options,
+        today=date(2026, 5, 11),
+    )
+    options_ledger.buy_to_open(candidates[0], reason="test entry", metadata={"score": 80})
+    option_client = FakeOptionsClient({}, {"AAPL260620C00105000": OptionQuote(symbol="AAPL260620C00105000", bid=1.55, ask=1.65)})
+    broker = FakeOptionsBroker()
+
+    report = asyncio.run(options_paper_once(config, PaperLedger(config.ledger_path, starting_cash=config.starting_cash), options_ledger, FakeAnalysisProvider({"AAPL": _analysis(price=100)}), option_client, broker=broker, today=date(2026, 5, 12)))
+
+    assert "ALPACA PAPER OPTIONS SELL_TO_CLOSE AAPL260620C00105000" in report
+    assert broker.sell_orders == [("AAPL260620C00105000", 1, 1.55)]
+    assert options_ledger.get_position("AAPL260620C00105000") is None
+    close_trade = options_ledger.list_trades()[-1]
+    assert close_trade.metadata["broker_order_id"] == "sell-order-1"
+    assert close_trade.pnl_realized == 55.0
 
 
 def test_format_options_status_reports_defined_risk_position(tmp_path):

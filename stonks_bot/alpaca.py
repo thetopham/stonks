@@ -296,6 +296,31 @@ class AlpacaPaperClient:
         next_open = clock.get("next_open") or "unknown"
         return False, f"market closed; next_open={next_open}"
 
+    def _submit_order_payload(self, payload: dict, *, fill_multiplier: float = 1.0) -> BrokerFill:
+        order = self._request_json("/orders", method="POST", payload=payload)
+        fill = self._filled_order(order, fill_multiplier=fill_multiplier)
+        if fill is not None:
+            return fill
+
+        order_id = str(order.get("id") or "unknown")
+        latest = order
+        if order_id != "unknown":
+            for _ in range(max(0, self.poll_attempts)):
+                if self.poll_delay_seconds > 0:
+                    time.sleep(self.poll_delay_seconds)
+                latest = self.get_order(order_id)
+                fill = self._filled_order(latest, fill_multiplier=fill_multiplier)
+                if fill is not None:
+                    return fill
+                if str(latest.get("status", "")).lower() in {"canceled", "expired", "rejected"}:
+                    break
+            try:
+                self.cancel_order(order_id)
+            except AlpacaConfigError:
+                pass
+        status = str(latest.get("status", order.get("status", "unknown"))).lower()
+        raise AlpacaConfigError(f"Alpaca paper order {order_id} status={status}; not filled after polling/cancel, so local ledger was not updated")
+
     def submit_market_order(self, symbol: str, *, side: str, notional: float | None = None, quantity: float | None = None) -> BrokerFill:
         side = side.lower()
         symbol = symbol.upper()
@@ -318,30 +343,38 @@ class AlpacaPaperClient:
             payload["notional"] = f"{notional:.2f}"
         else:
             payload["qty"] = f"{quantity:.8f}".rstrip("0").rstrip(".")
+        return self._submit_order_payload(payload)
 
-        order = self._request_json("/orders", method="POST", payload=payload)
-        fill = self._filled_order(order)
-        if fill is not None:
-            return fill
+    def submit_option_limit_order(self, symbol: str, *, side: str, contracts: int, limit_price: float) -> BrokerFill:
+        side = side.lower()
+        symbol = symbol.upper()
+        contracts = int(contracts)
+        if side not in {"buy", "sell"}:
+            raise AlpacaConfigError("Alpaca option order side must be buy or sell")
+        if contracts <= 0:
+            raise AlpacaConfigError("Alpaca option order contracts must be positive")
+        if limit_price <= 0:
+            raise AlpacaConfigError("Alpaca option order limit_price must be positive")
+        payload = {
+            "symbol": symbol,
+            "qty": str(contracts),
+            "side": side,
+            "type": "limit",
+            "limit_price": f"{limit_price:.2f}",
+            "time_in_force": "day",
+        }
+        fill = self._submit_order_payload(payload, fill_multiplier=100.0)
+        if int(round(fill.quantity)) != contracts:
+            raise AlpacaConfigError(
+                f"Alpaca option order {fill.order_id} filled unexpected contract quantity {fill.quantity}; local ledger was not updated"
+            )
+        return fill
 
-        order_id = str(order.get("id") or "unknown")
-        latest = order
-        if order_id != "unknown":
-            for _ in range(max(0, self.poll_attempts)):
-                if self.poll_delay_seconds > 0:
-                    time.sleep(self.poll_delay_seconds)
-                latest = self.get_order(order_id)
-                fill = self._filled_order(latest)
-                if fill is not None:
-                    return fill
-                if str(latest.get("status", "")).lower() in {"canceled", "expired", "rejected"}:
-                    break
-            try:
-                self.cancel_order(order_id)
-            except AlpacaConfigError:
-                pass
-        status = str(latest.get("status", order.get("status", "unknown"))).lower()
-        raise AlpacaConfigError(f"Alpaca paper order {order_id} status={status}; not filled after polling/cancel, so local ledger was not updated")
+    def submit_option_buy_to_open(self, symbol: str, *, contracts: int, limit_price: float) -> BrokerFill:
+        return self.submit_option_limit_order(symbol, side="buy", contracts=contracts, limit_price=limit_price)
+
+    def submit_option_sell_to_close(self, symbol: str, *, contracts: int, limit_price: float) -> BrokerFill:
+        return self.submit_option_limit_order(symbol, side="sell", contracts=contracts, limit_price=limit_price)
 
     def submit_buy(self, symbol: str, notional: float) -> BrokerFill:
         return self.submit_market_order(symbol, side="buy", notional=notional)
@@ -349,7 +382,7 @@ class AlpacaPaperClient:
     def submit_sell(self, symbol: str, quantity: float) -> BrokerFill:
         return self.submit_market_order(symbol, side="sell", quantity=quantity)
 
-    def _filled_order(self, order: dict) -> BrokerFill | None:
+    def _filled_order(self, order: dict, *, fill_multiplier: float = 1.0) -> BrokerFill | None:
         status = str(order.get("status", "unknown")).lower()
         order_id = str(order.get("id") or "unknown")
         symbol = str(order.get("symbol") or "").upper()
@@ -358,7 +391,7 @@ class AlpacaPaperClient:
         price = _as_float(order.get("filled_avg_price"), 0.0)
         if status != "filled" or quantity <= 0 or price <= 0:
             return None
-        return BrokerFill(order_id=order_id, symbol=symbol, side=side, status=status, quantity=quantity, price=price, notional=quantity * price)
+        return BrokerFill(order_id=order_id, symbol=symbol, side=side, status=status, quantity=quantity, price=price, notional=quantity * price * fill_multiplier)
 
 
 def _as_float(value: object, default: float = 0.0) -> float:
@@ -375,6 +408,8 @@ def format_account_summary(account: dict) -> str:
         "status": account.get("status", "unknown"),
         "equity": account.get("equity", "unknown"),
         "buying_power": account.get("buying_power", "unknown"),
+        "options_buying_power": account.get("options_buying_power", "unknown"),
+        "non_marginable_buying_power": account.get("non_marginable_buying_power", "unknown"),
         "trading_blocked": account.get("trading_blocked", "unknown"),
         "account_blocked": account.get("account_blocked", "unknown"),
         "pattern_day_trader": account.get("pattern_day_trader", "unknown"),

@@ -298,3 +298,48 @@ def test_get_latest_option_quotes_uses_alpaca_data_endpoint(monkeypatch):
             None,
         )
     ]
+
+
+def test_submit_option_limit_order_posts_single_leg_alpaca_paper_order(monkeypatch):
+    credentials = alpaca_module.AlpacaCredentials(
+        endpoint="https://paper-api.alpaca.markets/v2",
+        key="paper-key",
+        secret="paper-secret",
+    )
+    client = AlpacaPaperClient(credentials)
+    captured = []
+
+    def fake_request(path, *, method="GET", payload=None):
+        captured.append((path, method, payload))
+        return {
+            "id": "option-order-123",
+            "symbol": "AAPL260620C00105000",
+            "side": "buy",
+            "status": "filled",
+            "filled_qty": "1",
+            "filled_avg_price": "1.25",
+        }
+
+    monkeypatch.setattr(client, "_request_json", fake_request)
+
+    fill = client.submit_option_buy_to_open("aapl260620c00105000", contracts=1, limit_price=1.25)
+
+    assert captured == [
+        (
+            "/orders",
+            "POST",
+            {
+                "symbol": "AAPL260620C00105000",
+                "qty": "1",
+                "side": "buy",
+                "type": "limit",
+                "limit_price": "1.25",
+                "time_in_force": "day",
+            },
+        )
+    ]
+    assert fill.order_id == "option-order-123"
+    assert fill.symbol == "AAPL260620C00105000"
+    assert fill.quantity == 1
+    assert fill.price == 1.25
+    assert fill.notional == 125.0

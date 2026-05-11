@@ -2,6 +2,7 @@ from pathlib import Path
 
 from stonks_bot import cli
 from stonks_bot.ledger import PaperLedger
+from stonks_bot.options import OptionsPaperLedger
 
 
 def _write_config(path: Path) -> None:
@@ -175,3 +176,58 @@ def test_alpaca_sync_yes_resets_local_ledger_to_sanitized_account_snapshot(tmp_p
     assert position.entry_price == 150.25
     assert position.last_price == 151.50
     assert position.metadata["broker_synced"] is True
+
+
+def test_options_sync_cash_uses_alpaca_options_buying_power_without_orders(tmp_path, monkeypatch, capsys):
+    for key in ["alpaca_endpoint", "alpaca_key", "alpaca_secret", "ALPACA_ENDPOINT", "ALPACA_KEY", "ALPACA_SECRET"]:
+        monkeypatch.delenv(key, raising=False)
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.chdir(tmp_path)
+    config_path = tmp_path / "config.toml"
+    env_path = tmp_path / ".env"
+    _write_config(config_path)
+    env_path.write_text(
+        "\n".join(
+            [
+                "alpaca_endpoint=https://paper-api.alpaca.markets/v2",
+                "alpaca_key=paper-key",
+                "alpaca_secret=paper-secret",
+            ]
+        )
+    )
+
+    class FakeClient:
+        def __init__(self, credentials):
+            assert credentials.key == "paper-key"
+            assert credentials.secret == "paper-secret"
+            self.submitted_orders = []
+
+        def get_account(self):
+            return {
+                "status": "ACTIVE",
+                "cash": "10000.00",
+                "equity": "61200.00",
+                "buying_power": "126337.95",
+                "options_buying_power": "63168.55",
+                "trading_blocked": False,
+                "account_blocked": False,
+                "pattern_day_trader": False,
+            }
+
+    monkeypatch.setattr(cli, "AlpacaPaperClient", FakeClient)
+
+    result = cli.main(["options-sync-cash", "--config", str(config_path), "--env", str(env_path)])
+
+    output = capsys.readouterr().out
+    assert result == 0
+    assert "READ-ONLY Alpaca paper options buying-power sync" in output
+    assert "cash=63168.55" in output
+    assert "source=alpaca_options_buying_power" in output
+    assert "paper-key" not in output
+    assert "paper-secret" not in output
+
+    options_ledger = OptionsPaperLedger(tmp_path / "ledger.sqlite3", starting_cash=10_000)
+    assert options_ledger.cash == 63_168.55
+    assert options_ledger.cash_source == "alpaca_options_buying_power"

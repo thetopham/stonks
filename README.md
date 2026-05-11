@@ -2,7 +2,7 @@
 
 Autonomous stock-market paper trader using the TradingView MCP server for market data and technical analysis.
 
-Safety boundary: paper trading only. By default, the trading loop records local SQLite paper fills only. If `[broker] submit_orders = true` with `paper_only = true`, the loop submits Alpaca paper market orders to `https://paper-api.alpaca.markets/v2`, records only filled paper orders in SQLite, and still rejects real-money Alpaca endpoints plus `execution.live_trading_enabled=true`. The options overlay is stricter: it never submits option orders in v1; it only reads Alpaca option contracts/quotes and can write local options paper fills.
+Safety boundary: paper trading only. By default, the trading loop records local SQLite paper fills only. If `[broker] submit_orders = true` with `paper_only = true`, the loop submits Alpaca paper market orders to `https://paper-api.alpaca.markets/v2`, records only filled paper orders in SQLite, and still rejects real-money Alpaca endpoints plus `execution.live_trading_enabled=true`. The options overlay uses the same hard live-trading boundary: `options-scan` is read-only, `options-paper` records local long-call/long-put fills by default, and it submits single-leg Alpaca paper option limit orders only when `[broker].submit_orders=true` and `[options].submit_orders=true`.
 
 ## Strategy summary
 
@@ -23,7 +23,7 @@ See [docs/strategy-and-scoring.md](docs/strategy-and-scoring.md) for the exact s
 
 - [docs/index.md](docs/index.md) — docs map.
 - [docs/strategy-and-scoring.md](docs/strategy-and-scoring.md) — exact strategy, scoring, entry/exit, sizing, and limitations.
-- [docs/options-overlay.md](docs/options-overlay.md) — paper-only Alpaca options scanner and local options paper ledger.
+- [docs/options-overlay.md](docs/options-overlay.md) — Alpaca options scanner, local options paper ledger, dashboard overlay, and guarded Alpaca paper option execution.
 - [docs/operator-descriptions.md](docs/operator-descriptions.md) — dashboard, CLI, config, ledger, and service field descriptions.
 - [docs/roadmap.md](docs/roadmap.md) — future TODOs for ranked screening, portfolio optimization, backtesting, sentiment/news, and dashboard explainability.
 
@@ -61,13 +61,15 @@ timeframe = "1D"
 
 `stonks-paper options-scan --config config.paper.toml` is a read-only options overlay. It uses the same equity technical signals, reads Alpaca `/v2/options/contracts` plus latest option quotes, filters for liquid defined-risk long calls/puts, and writes no ledger trades.
 
-`stonks-paper options-paper --config config.paper.toml` records local options paper trades only. It buys to open one-contract long calls/puts when a candidate passes DTE/liquidity/spread/debit/risk gates, closes local paper positions on option stop/profit/expiration-risk rules, and never submits Alpaca option orders.
+`stonks-paper options-paper --config config.paper.toml` runs the options paper loop once. With `[options].submit_orders=false`, it records local long-call/long-put paper fills only. With `[broker].submit_orders=true` and `[options].submit_orders=true`, it first syncs options cash from Alpaca paper `options_buying_power` (falling back to non-marginable/account buying power if needed), checks that the Alpaca market is open, submits single-leg Alpaca paper limit orders for buy-to-open/sell-to-close, and records only confirmed filled paper option orders in SQLite.
 
-`stonks-paper options-status --config config.paper.toml` reads only the local options paper ledger and prints cash, open option positions, max loss, unrealized PnL, and realized PnL.
+`stonks-paper options-sync-cash --config config.paper.toml --env .env` performs a read-only Alpaca paper account check and updates the local options cash snapshot from `options_buying_power`; it submits no orders. The dashboard reads this persisted snapshot instead of assuming the configured starting cash.
 
-`stonks-paper watch --config config.paper.toml` loops forever at `execution.scan_interval_seconds`. If broker paper orders are enabled, this is the autonomous Alpaca paper-order loop.
+`stonks-paper options-status --config config.paper.toml` reads only the local options paper ledger and prints cash, cash source, open option positions, max loss, unrealized PnL, and realized PnL.
 
-`stonks-paper dashboard --config config.paper.toml --host 0.0.0.0 --port 8791` serves a read-only dashboard from the local SQLite paper ledger. If `STONKS_DASHBOARD_TOKEN` is set, the dashboard requires `?token=...` or an `Authorization: Bearer ...` header.
+`stonks-paper watch --config config.paper.toml` loops forever at `execution.scan_interval_seconds`. If broker paper orders are enabled, this is the autonomous Alpaca paper-order loop. If `[options].auto_trade=true`, each watch tick also runs the options paper loop; with `[options].submit_orders=true` it can submit Alpaca paper option limit orders under the same paper-only safeguards.
+
+`stonks-paper dashboard --config config.paper.toml --host 0.0.0.0 --port 8791` serves a read-only dashboard from the local SQLite paper ledger, including the Options Overlay section with option cash, open contracts, recent option trades, and current option risk settings. If `STONKS_DASHBOARD_TOKEN` is set, the dashboard requires `?token=...` or an `Authorization: Bearer ...` header.
 
 `stonks-paper alpaca-check --config config.paper.toml --env .env` performs a read-only Alpaca paper account check with the configured endpoint/key/secret env names. It also loads `.env`, `~/.hermes/.env`, `~/.hermes/hermes-agent/.env`, and `~/hermes-workspace/.env` without overwriting non-empty values. It prints account status/equity/buying power and does not submit orders or print credentials.
 
@@ -88,12 +90,12 @@ Default ledger path: `data/paper-ledger.sqlite3`.
 
 Tables:
 
-- `state`: equity paper cash plus `options_cash` for the separate options overlay ledger
+- `state`: equity paper cash plus `options_cash`, `options_cash_source`, and `options_cash_synced_at` for the separate options overlay ledger
 - `positions`: currently open simulated equity positions
 - `trades`: append-only simulated equity fills
-- `option_positions`: currently open local options paper positions
-- `option_trades`: append-only local options paper fills
+- `option_positions`: currently open options paper positions, whether locally simulated or confirmed Alpaca paper fills
+- `option_trades`: append-only options paper fills, including broker order IDs when Alpaca paper execution is enabled
 
 ## Approval boundary
 
-Real-money live trading remains explicitly out of scope. Starting/stopping the paper bot service is an operator action. Read-only Alpaca paper account checks are allowed for credential validation. Alpaca paper broker order submission is allowed only through `[broker] submit_orders = true` while `paper_only = true`; live endpoints, custody actions, withdrawals, and real-money order placement remain rejected. Options v1 is local-paper/read-only only: no Alpaca option order submission exists yet.
+Real-money live trading remains explicitly out of scope. Starting/stopping the paper bot service is an operator action. Read-only Alpaca paper account checks are allowed for credential validation. Alpaca paper broker order submission is allowed only through `[broker] submit_orders = true` while `paper_only = true`; live endpoints, custody actions, withdrawals, and real-money order placement remain rejected. Options execution is restricted to long calls/puts on the Alpaca paper endpoint only, requires both `[broker].submit_orders=true` and `[options].submit_orders=true`, records only filled paper orders, and does not use naked shorts, multi-leg orders, or live trading.

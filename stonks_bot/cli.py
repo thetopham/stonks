@@ -16,7 +16,7 @@ from .alpaca import (
 )
 from .config import load_config
 from .ledger import PaperLedger
-from .options import OptionsPaperLedger, format_options_status, options_paper_once, options_scan_once
+from .options import OptionsPaperLedger, format_options_status, options_paper_once, options_scan_once, sync_options_cash_from_account
 from .dashboard import serve_dashboard
 from .mcp_client import TradingViewMCPProvider
 from .runner import format_status, run_once, screen_once
@@ -76,18 +76,29 @@ async def _options_paper(config_path: Path, env_paths=None) -> str:
     config, client = _build_options_data_client(config_path, env_paths)
     ledger = PaperLedger(config.ledger_path, starting_cash=config.starting_cash)
     options_ledger = OptionsPaperLedger(config.ledger_path, starting_cash=config.starting_cash)
+    broker = client if config.options.submit_orders else None
     try:
+        if config.options.submit_orders:
+            sync_options_cash_from_account(options_ledger, client.get_account())
         async with TradingViewMCPProvider(config.provider.command, config.provider.args, config.provider.timeframe) as provider:
-            return await options_paper_once(config, ledger, options_ledger, provider, client)
+            return await options_paper_once(config, ledger, options_ledger, provider, client, broker=broker)
     finally:
         ledger.close()
         options_ledger.close()
 
 
 async def _watch(config_path: Path) -> None:
-    config = load_config(config_path)
     while True:
-        print(await _run_once(config_path), flush=True)
+        config = load_config(config_path)
+        try:
+            print(await _run_once(config_path), flush=True)
+        except Exception as exc:  # pragma: no cover - defensive around long-running service loop
+            print(f"stonks-paper-bot scan failed: {type(exc).__name__}: {exc}", flush=True)
+        if config.options.auto_trade:
+            try:
+                print(await _options_paper(config_path), flush=True)
+            except Exception as exc:  # pragma: no cover - defensive around long-running service loop
+                print(f"stonks-paper-bot options auto-trade failed: {type(exc).__name__}: {exc}", flush=True)
         await asyncio.sleep(config.execution.scan_interval_seconds)
 
 
@@ -155,12 +166,16 @@ def main(argv: list[str] | None = None) -> int:
     options_scan.add_argument("--config", type=Path, default=Path("config.paper.toml"))
     options_scan.add_argument("--env", type=Path, action="append", default=None, help="extra env file to load before .env and Hermes defaults; can be repeated")
 
-    options_paper = sub.add_parser("options-paper", help="paper-trade defined-risk long options locally; no option broker orders")
+    options_paper = sub.add_parser("options-paper", help="run the options overlay once; submits Alpaca paper option orders only when [options].submit_orders=true")
     options_paper.add_argument("--config", type=Path, default=Path("config.paper.toml"))
     options_paper.add_argument("--env", type=Path, action="append", default=None, help="extra env file to load before .env and Hermes defaults; can be repeated")
 
     options_status = sub.add_parser("options-status", help="print local options paper ledger status without network calls")
     options_status.add_argument("--config", type=Path, default=Path("config.paper.toml"))
+
+    options_sync_cash = sub.add_parser("options-sync-cash", help="read-only sync of options cash to Alpaca paper options buying power")
+    options_sync_cash.add_argument("--config", type=Path, default=Path("config.paper.toml"))
+    options_sync_cash.add_argument("--env", type=Path, action="append", default=None, help="extra env file to load before .env and Hermes defaults; can be repeated")
 
     watch = sub.add_parser("watch", help="run autonomous paper scans forever until interrupted")
     watch.add_argument("--config", type=Path, default=Path("config.paper.toml"))
@@ -226,6 +241,28 @@ def main(argv: list[str] | None = None) -> int:
         config = load_config(args.config)
         options_ledger = OptionsPaperLedger(config.ledger_path, starting_cash=config.starting_cash)
         print(format_options_status(config, options_ledger))
+        return 0
+
+    if args.command == "options-sync-cash":
+        try:
+            load_default_env_files(args.config, extra_paths=args.env)
+            config = load_config(args.config)
+            credentials = load_alpaca_credentials(config.broker)
+            client = AlpacaPaperClient(credentials)
+            account = client.get_account()
+            options_ledger = OptionsPaperLedger(config.ledger_path, starting_cash=config.starting_cash)
+            try:
+                cash_value = sync_options_cash_from_account(options_ledger, account)
+                cash_source = options_ledger.cash_source
+            finally:
+                options_ledger.close()
+        except (AlpacaConfigError, ValueError) as exc:
+            print(f"Options cash sync failed: {exc}", file=sys.stderr)
+            return 2
+        print("Boundary: READ-ONLY Alpaca paper options buying-power sync — no orders submitted")
+        print(f"Endpoint: {credentials.endpoint}")
+        print(f"Account: {format_account_summary(account)}")
+        print(f"Options cash sync complete: cash={cash_value:.2f}, source={cash_source}")
         return 0
 
     if args.command == "watch":

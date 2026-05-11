@@ -5,6 +5,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Protocol
 import json
+import math
 import sqlite3
 
 from .config import BotConfig, OptionsConfig
@@ -103,6 +104,22 @@ class OptionsDataClient(Protocol):
     ) -> list[dict | OptionContract]: ...
 
     def get_latest_option_quotes(self, symbols: list[str], feed: str = "indicative") -> dict[str, dict | OptionQuote]: ...
+
+
+class OptionBrokerFillLike(Protocol):
+    order_id: str
+    symbol: str
+    side: str
+    status: str
+    quantity: float
+    price: float
+    notional: float
+
+
+class OptionsBrokerExecutor(Protocol):
+    def market_is_open(self) -> tuple[bool, str]: ...
+    def submit_option_buy_to_open(self, symbol: str, *, contracts: int, limit_price: float) -> OptionBrokerFillLike: ...
+    def submit_option_sell_to_close(self, symbol: str, *, contracts: int, limit_price: float) -> OptionBrokerFillLike: ...
 
 
 def _now() -> str:
@@ -307,15 +324,48 @@ class OptionsPaperLedger:
         )
         if self.conn.execute("SELECT value FROM state WHERE key='options_cash'").fetchone() is None:
             self.conn.execute("INSERT INTO state(key, value) VALUES('options_cash', ?)", (str(float(starting_cash)),))
+        if self.conn.execute("SELECT value FROM state WHERE key='options_cash_source'").fetchone() is None:
+            self.conn.execute("INSERT INTO state(key, value) VALUES('options_cash_source', ?)", ("config.starting_cash",))
+        if self.conn.execute("SELECT value FROM state WHERE key='options_cash_synced_at'").fetchone() is None:
+            self.conn.execute("INSERT INTO state(key, value) VALUES('options_cash_synced_at', ?)", ("",))
         self.conn.commit()
+
+    def _get_state(self, key: str, default: str = "") -> str:
+        row = self.conn.execute("SELECT value FROM state WHERE key=?", (key,)).fetchone()
+        return str(row["value"]) if row is not None else default
+
+    def _set_state(self, key: str, value: str) -> None:
+        self.conn.execute(
+            "INSERT INTO state(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, value),
+        )
 
     @property
     def cash(self) -> float:
-        row = self.conn.execute("SELECT value FROM state WHERE key='options_cash'").fetchone()
-        return float(row["value"])
+        return float(self._get_state("options_cash", "0"))
+
+    @property
+    def cash_source(self) -> str:
+        return self._get_state("options_cash_source", "config.starting_cash")
+
+    @property
+    def cash_synced_at(self) -> str:
+        return self._get_state("options_cash_synced_at", "")
+
+    def sync_cash(self, value: float, *, source: str) -> None:
+        value = float(value)
+        source = str(source or "").strip()
+        if value < 0:
+            raise ValueError("options cash sync value must be non-negative")
+        if not source:
+            raise ValueError("options cash sync source is required")
+        self._set_cash(value)
+        self._set_state("options_cash_source", source)
+        self._set_state("options_cash_synced_at", _now())
+        self.conn.commit()
 
     def _set_cash(self, value: float) -> None:
-        self.conn.execute("UPDATE state SET value=? WHERE key='options_cash'", (str(float(value)),))
+        self._set_state("options_cash", str(float(value)))
 
     def get_position(self, contract_symbol: str) -> OptionPosition | None:
         row = self.conn.execute(
@@ -358,16 +408,18 @@ class OptionsPaperLedger:
         row = self.conn.execute("SELECT COUNT(*) AS n FROM option_positions").fetchone()
         return int(row["n"])
 
-    def buy_to_open(self, candidate: OptionCandidate, reason: str, metadata: dict[str, Any]) -> OptionTrade:
+    def buy_to_open(self, candidate: OptionCandidate, reason: str, metadata: dict[str, Any], fill_price: float | None = None) -> OptionTrade:
         contract_symbol = candidate.contract_symbol.upper()
+        entry_price = candidate.ask if fill_price is None else float(fill_price)
+        entry_debit = entry_price * 100 * candidate.contracts
         if self.get_position(contract_symbol) is not None:
             raise ValueError(f"option position for {contract_symbol} is already open")
-        if candidate.ask <= 0 or candidate.max_loss <= 0:
-            raise ValueError("option candidate ask and max_loss must be positive")
-        if candidate.max_loss > self.cash + 1e-9:
+        if entry_price <= 0 or entry_debit <= 0:
+            raise ValueError("option entry price and debit must be positive")
+        if entry_debit > self.cash + 1e-9:
             raise ValueError("not enough options paper cash")
         timestamp = _now()
-        cash_after = self.cash - candidate.max_loss
+        cash_after = self.cash - entry_debit
         stored_metadata = dict(metadata)
         stored_metadata.update(
             {
@@ -393,8 +445,8 @@ class OptionsPaperLedger:
                 candidate.strike_price,
                 candidate.expiration_date,
                 candidate.contracts,
-                candidate.ask,
-                candidate.max_loss,
+                entry_price,
+                entry_debit,
                 timestamp,
                 candidate.mid,
                 candidate.mid,
@@ -408,8 +460,8 @@ class OptionsPaperLedger:
             candidate.underlying_symbol,
             "BUY_TO_OPEN",
             candidate.contracts,
-            candidate.ask,
-            candidate.max_loss,
+            entry_price,
+            entry_debit,
             reason,
             timestamp,
             cash_after,
@@ -423,8 +475,8 @@ class OptionsPaperLedger:
             candidate.underlying_symbol,
             "BUY_TO_OPEN",
             candidate.contracts,
-            candidate.ask,
-            candidate.max_loss,
+            entry_price,
+            entry_debit,
             reason,
             timestamp,
             cash_after,
@@ -668,6 +720,40 @@ def _candidate_line(candidate: OptionCandidate) -> str:
     )
 
 
+def options_boundary_line(config: BotConfig) -> str:
+    if config.options.submit_orders:
+        return "Boundary: ALPACA PAPER OPTIONS ORDERS ENABLED — buy-to-open/sell-to-close limit orders on the Alpaca paper endpoint only; no live endpoint"
+    return "Boundary: LOCAL OPTIONS PAPER ONLY — no Alpaca option orders submitted, no live execution"
+
+
+def sync_options_cash_from_account(options_ledger: OptionsPaperLedger, account: dict) -> float:
+    for field in ("options_buying_power", "non_marginable_buying_power", "buying_power"):
+        raw_value = account.get(field)
+        if raw_value is None:
+            continue
+        buying_power = _as_float(raw_value, math.nan)
+        if math.isfinite(buying_power):
+            source = f"alpaca_{field}"
+            options_ledger.sync_cash(buying_power, source=source)
+            return buying_power
+    raise ValueError("Alpaca account response did not include options_buying_power, non_marginable_buying_power, or buying_power")
+
+
+def _broker_metadata(fill: OptionBrokerFillLike, metadata: dict[str, Any]) -> dict[str, Any]:
+    result = dict(metadata)
+    result.update(
+        {
+            "broker": "alpaca",
+            "broker_order_id": fill.order_id,
+            "broker_status": fill.status,
+            "broker_side": fill.side,
+            "broker_symbol": fill.symbol,
+            "broker_notional": fill.notional,
+        }
+    )
+    return result
+
+
 async def options_scan_once(
     config: BotConfig,
     equity_ledger: PaperLedger,
@@ -711,7 +797,14 @@ def _close_reason(config: BotConfig, position: OptionPosition, quote: OptionQuot
     return False, "position remains within option risk rules", close_price
 
 
-def _refresh_and_close_positions(config: BotConfig, options_ledger: OptionsPaperLedger, client: OptionsDataClient, today: date) -> list[str]:
+def _refresh_and_close_positions(
+    config: BotConfig,
+    options_ledger: OptionsPaperLedger,
+    client: OptionsDataClient,
+    today: date,
+    broker: OptionsBrokerExecutor | None = None,
+    broker_market_state=None,
+) -> list[str]:
     positions = options_ledger.list_positions()
     if not positions:
         return []
@@ -720,21 +813,48 @@ def _refresh_and_close_positions(config: BotConfig, options_ledger: OptionsPaper
     for position in positions:
         quote = normalize_option_quote(position.contract_symbol, raw_quotes.get(position.contract_symbol, {}))
         if quote is None:
-            lines.append(f"HOLD OPTIONS {position.contract_symbol}: no usable quote; no local close recorded")
+            lines.append(f"HOLD OPTIONS {position.contract_symbol}: no usable quote; no close recorded")
             continue
         options_ledger.mark_mid(position.contract_symbol, _quote_mid(quote))
         should_close, reason, close_price = _close_reason(config, position, quote, today)
         if should_close:
-            trade = options_ledger.sell_to_close(
-                position.contract_symbol,
-                price=close_price,
-                reason=reason,
-                metadata={"bid": quote.bid, "ask": quote.ask},
-            )
-            lines.append(
-                f"PAPER OPTIONS SELL_TO_CLOSE {trade.contract_symbol}: contracts={trade.contracts} @ {trade.price:.2f}, "
-                f"proceeds={trade.notional:.2f}, realized_pnl={trade.pnl_realized:.2f}, reason={reason}"
-            )
+            metadata = {"bid": quote.bid, "ask": quote.ask}
+            if config.options.submit_orders:
+                if broker is None or broker_market_state is None:
+                    raise ValueError("options.submit_orders=true but no Alpaca paper options broker executor was provided")
+                is_open, market_reason = broker_market_state()
+                if not is_open:
+                    lines.append(f"BROKER OPTIONS HOLD {position.contract_symbol}: {market_reason}; no Alpaca paper sell-to-close submitted")
+                    continue
+                fill = broker.submit_option_sell_to_close(
+                    position.contract_symbol,
+                    contracts=position.contracts,
+                    limit_price=close_price,
+                )
+                if fill.symbol != position.contract_symbol:
+                    raise ValueError(f"Alpaca filled unexpected option symbol {fill.symbol}; local ledger was not updated")
+                trade = options_ledger.sell_to_close(
+                    position.contract_symbol,
+                    price=fill.price,
+                    reason=reason,
+                    metadata=_broker_metadata(fill, metadata),
+                )
+                lines.append(
+                    f"ALPACA PAPER OPTIONS SELL_TO_CLOSE {trade.contract_symbol}: order_id={fill.order_id}, "
+                    f"contracts={trade.contracts} @ {trade.price:.2f}, proceeds={trade.notional:.2f}, "
+                    f"realized_pnl={trade.pnl_realized:.2f}, reason={reason}"
+                )
+            else:
+                trade = options_ledger.sell_to_close(
+                    position.contract_symbol,
+                    price=close_price,
+                    reason=reason,
+                    metadata=metadata,
+                )
+                lines.append(
+                    f"PAPER OPTIONS SELL_TO_CLOSE {trade.contract_symbol}: contracts={trade.contracts} @ {trade.price:.2f}, "
+                    f"proceeds={trade.notional:.2f}, realized_pnl={trade.pnl_realized:.2f}, reason={reason}"
+                )
         else:
             pnl = close_price * 100 * position.contracts - position.entry_debit
             lines.append(
@@ -749,24 +869,37 @@ async def options_paper_once(
     options_ledger: OptionsPaperLedger,
     provider: AnalysisProvider,
     client: OptionsDataClient,
+    broker: OptionsBrokerExecutor | None = None,
     today: date | None = None,
 ) -> str:
     if not config.execution.dry_run or config.execution.live_trading_enabled:
         raise ValueError("refusing to run options paper loop: paper trading only")
+    if config.options.submit_orders and broker is None:
+        raise ValueError("options.submit_orders=true but no Alpaca paper options broker executor was provided")
     today = today or date.today()
     lines = [
         "stonks-paper-bot options paper",
-        "Boundary: LOCAL OPTIONS PAPER ONLY — no Alpaca option orders submitted, no live execution",
+        options_boundary_line(config),
     ]
     if not config.options.enabled:
         lines.append("Options overlay disabled in config; set [options].enabled=true to paper trade.")
         return "\n".join(lines)
 
-    lines.extend(_refresh_and_close_positions(config, options_ledger, client, today))
+    market_state: tuple[bool, str] | None = None
+
+    def broker_market_state() -> tuple[bool, str]:
+        nonlocal market_state
+        if market_state is None:
+            assert broker is not None
+            market_state = broker.market_is_open()
+        return market_state
+
+    lines.extend(_refresh_and_close_positions(config, options_ledger, client, today, broker=broker, broker_market_state=broker_market_state))
     candidates, notes = await _scan_candidates(config, equity_ledger, provider, client, today)
     lines.extend(notes)
     open_underlyings = {position.underlying_symbol for position in options_ledger.list_positions()}
-    risk_cap = config.starting_cash * config.options.max_trade_risk_pct
+    risk_basis = options_ledger.cash
+    risk_cap = risk_basis * config.options.max_trade_risk_pct
 
     for candidate in candidates:
         if options_ledger.open_position_count() >= config.options.max_open_positions:
@@ -780,19 +913,43 @@ async def options_paper_once(
                 f"SKIP OPTIONS {candidate.underlying_symbol}: max_loss={candidate.max_loss:.2f} exceeds risk_cap={risk_cap:.2f}"
             )
             continue
+        if candidate.max_loss > options_ledger.cash + 1e-9:
+            lines.append(f"SKIP OPTIONS {candidate.underlying_symbol}: max_loss={candidate.max_loss:.2f} exceeds options_cash={options_ledger.cash:.2f}")
+            continue
+        if config.options.submit_orders:
+            is_open, market_reason = broker_market_state()
+            if not is_open:
+                lines.append(f"BROKER OPTIONS HOLD {candidate.underlying_symbol}: {market_reason}; no Alpaca paper buy-to-open submitted")
+                continue
+            assert broker is not None
+            fill = broker.submit_option_buy_to_open(
+                candidate.contract_symbol,
+                contracts=candidate.contracts,
+                limit_price=candidate.ask,
+            )
+            if fill.symbol != candidate.contract_symbol:
+                raise ValueError(f"Alpaca filled unexpected option symbol {fill.symbol}; local ledger was not updated")
+            metadata = _broker_metadata(fill, {"score": candidate.signal_score, "strategy": candidate.strategy})
+            fill_price = fill.price
+            line_prefix = f"ALPACA PAPER OPTIONS BUY_TO_OPEN {candidate.underlying_symbol} {candidate.contract_symbol}: order_id={fill.order_id}, "
+        else:
+            metadata = {"score": candidate.signal_score, "strategy": candidate.strategy}
+            fill_price = None
+            line_prefix = f"PAPER OPTIONS BUY_TO_OPEN {candidate.underlying_symbol} {candidate.contract_symbol}: "
         try:
             trade = options_ledger.buy_to_open(
                 candidate,
                 reason="; ".join(candidate.reasons[:5]),
-                metadata={"score": candidate.signal_score, "strategy": candidate.strategy},
+                metadata=metadata,
+                fill_price=fill_price,
             )
         except ValueError as exc:
             lines.append(f"SKIP OPTIONS {candidate.underlying_symbol}: {exc}")
             continue
         open_underlyings.add(candidate.underlying_symbol)
         lines.append(
-            f"PAPER OPTIONS BUY_TO_OPEN {trade.underlying_symbol} {trade.contract_symbol}: contracts={trade.contracts} "
-            f"@ {trade.price:.2f}, debit={trade.notional:.2f}, max_loss={trade.notional:.2f}, score={candidate.signal_score:.1f}"
+            f"{line_prefix}contracts={trade.contracts} @ {trade.price:.2f}, "
+            f"debit={trade.notional:.2f}, max_loss={trade.notional:.2f}, score={candidate.signal_score:.1f}"
         )
     lines.append(format_options_status(config, options_ledger, compact=True))
     return "\n".join(lines)
@@ -805,14 +962,14 @@ def format_options_status(config: BotConfig, options_ledger: OptionsPaperLedger,
     position_value = sum((position.last_mid or position.entry_price) * 100 * position.contracts for position in positions)
     equity = options_ledger.cash + position_value
     lines = [
-        f"Options portfolio: cash={options_ledger.cash:.2f}, open_positions={len(positions)}, equity≈{equity:.2f}, realized_pnl={realized:.2f}",
+        f"Options portfolio: cash={options_ledger.cash:.2f}, cash_source={options_ledger.cash_source}, open_positions={len(positions)}, equity≈{equity:.2f}, realized_pnl={realized:.2f}",
     ]
     if not compact:
-        lines.insert(0, "Boundary: LOCAL OPTIONS PAPER ONLY — no broker option orders, no live execution")
+        lines.insert(0, options_boundary_line(config))
         lines.append(
             f"Options rules: {config.options.min_dte}-{config.options.max_dte} DTE, "
             f"max_spread={config.options.max_spread_pct * 100:.1f}%, max_debit={config.options.max_contract_debit:.2f}, "
-            f"risk_cap={config.options.max_trade_risk_pct * 100:.2f}% of starting cash"
+            f"risk_cap={config.options.max_trade_risk_pct * 100:.2f}% of current options cash/buying power"
         )
     for position in positions:
         mark = position.last_mid or position.entry_price
