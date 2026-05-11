@@ -1,4 +1,5 @@
-# Dry-run only. This bot never submits broker orders.
+# Local paper ledger by default. Alpaca paper order submission is available only when
+# broker.submit_orders=true, broker.paper_only=true, and the endpoint is the Alpaca paper endpoint.
 ledger_path = "data/paper-ledger.sqlite3"
 starting_cash = 100000.0
 max_position_pct = 0.10
@@ -22,6 +23,14 @@ take_profit_pct = 0.15
 command = "/home/matt/.local/bin/uvx"
 args = ["--from", "tradingview-mcp-server", "tradingview-mcp"]
 timeframe = "1D"
+
+[broker]
+name = "alpaca"
+endpoint_env = "alpaca_endpoint"
+key_env = "alpaca_key"
+secret_env = "alpaca_secret"
+paper_only = true
+submit_orders = false
 
 [[watchlist]]
 symbol = "AAPL"

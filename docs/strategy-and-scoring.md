@@ -2,6 +2,8 @@
 
 Stonks Paper Bot is a watchlist scanner plus paper ledger. On each scan it asks TradingView MCP for `combined_analysis` on each configured symbol and timeframe, turns the response into a 0-100 technical score, then applies deterministic BUY/HOLD/SELL gates.
 
+By default, BUY/SELL fills are local SQLite simulations. If `[broker] submit_orders = true` with Alpaca `paper_only = true`, accepted BUY/SELL signals submit Alpaca paper market orders while the market is open; only confirmed filled paper orders are recorded in SQLite.
+
 It is not currently a portfolio optimizer. It does not rank all candidates before buying. It scans the watchlist in file order and acts as soon as a symbol qualifies.
 
 ## Data source
@@ -79,12 +81,14 @@ When a BUY is accepted, paper notional is:
 
 With `max_position_pct = 0.10`, the bot allocates 10% of remaining paper cash to each accepted buy. This means position sizes shrink geometrically as cash is consumed: first buy is 10% of cash, next buy is 10% of the remaining cash, and so on.
 
-Paper fill prices include slippage:
+Local simulated paper fill prices include slippage:
 
 - BUY price = market price * (1 + `slippage_pct / 100`)
 - SELL price = market price * (1 - `slippage_pct / 100`)
 
 The default `slippage_pct = 0.02` means 0.02%, not 2%.
+
+When Alpaca paper order submission is enabled, slippage is not applied locally. The bot uses Alpaca's confirmed `filled_avg_price` and `filled_qty`; if an order is not filled after polling, the bot attempts to cancel it and does not write a ledger fill.
 
 `commission_pct` is parsed from config but is not currently applied by the runner. Treat it as a reserved setting until commission accounting is implemented.
 

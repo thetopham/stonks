@@ -16,6 +16,7 @@ dev = ["pytest>=8.0"]
 
 [project.scripts]
 stonks-paper = "stonks_bot.cli:main"
+hermes-bloomberg-collect = "stonks_bot.bloomberg_collector:main"
 
 [tool.setuptools.packages.find]
 include = ["stonks_bot*"]

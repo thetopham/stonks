@@ -31,6 +31,16 @@ class ProviderConfig:
 
 
 @dataclass(slots=True)
+class BrokerConfig:
+    name: str = "none"
+    endpoint_env: str = "alpaca_endpoint"
+    key_env: str = "alpaca_key"
+    secret_env: str = "alpaca_secret"
+    paper_only: bool = True
+    submit_orders: bool = False
+
+
+@dataclass(slots=True)
 class BotConfig:
     ledger_path: Path
     starting_cash: float = 100_000.0
@@ -41,6 +51,7 @@ class BotConfig:
     execution: ExecutionConfig = field(default_factory=ExecutionConfig)
     strategy: StrategyConfig = field(default_factory=StrategyConfig)
     provider: ProviderConfig = field(default_factory=ProviderConfig)
+    broker: BrokerConfig = field(default_factory=BrokerConfig)
     watchlist: list[WatchItem] = field(default_factory=list)
 
 
@@ -73,6 +84,20 @@ def load_config(path: str | Path) -> BotConfig:
         timeframe=str(provider_data.get("timeframe", "1D")),
     )
 
+    broker_data = data.get("broker", {})
+    broker = BrokerConfig(
+        name=str(broker_data.get("name", "none")).lower(),
+        endpoint_env=str(broker_data.get("endpoint_env", "alpaca_endpoint")),
+        key_env=str(broker_data.get("key_env", "alpaca_key")),
+        secret_env=str(broker_data.get("secret_env", "alpaca_secret")),
+        paper_only=bool(broker_data.get("paper_only", True)),
+        submit_orders=bool(broker_data.get("submit_orders", False)),
+    )
+    if not broker.paper_only:
+        raise ValueError("broker config must remain paper_only=true")
+    if broker.submit_orders and broker.name != "alpaca":
+        raise ValueError("broker order submission currently supports only Alpaca paper accounts")
+
     watchlist = [
         WatchItem(symbol=str(item["symbol"]).upper(), exchange=str(item.get("exchange", "NASDAQ")).upper())
         for item in data.get("watchlist", [])
@@ -90,5 +115,6 @@ def load_config(path: str | Path) -> BotConfig:
         execution=execution,
         strategy=strategy,
         provider=provider,
+        broker=broker,
         watchlist=watchlist,
     )

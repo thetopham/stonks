@@ -10,4 +10,4 @@ Start here if you are trying to understand what the autonomous paper trader is d
 
 ## Safety boundary
 
-This project is paper-only. It records simulated trades in a local SQLite ledger. It has no broker adapter, no live order submission path, no private-key handling, and rejects config that disables dry-run mode or enables live trading.
+This project is paper-only. It records local simulated trades in SQLite by default. When `[broker] submit_orders = true`, it can submit Alpaca paper market orders to the paper endpoint and records only confirmed filled paper orders in SQLite. It still rejects real-money Alpaca endpoints, disabled dry-run mode, and `execution.live_trading_enabled=true`.

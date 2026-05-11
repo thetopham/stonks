@@ -142,6 +142,30 @@ class PaperLedger:
         self.conn.execute("UPDATE positions SET last_price=?, highest_price=? WHERE symbol=?", (price, highest, symbol.upper()))
         self.conn.commit()
 
+    def reset_to_broker_snapshot(self, cash: float, positions: list[dict[str, Any]]) -> None:
+        timestamp = _now()
+        self.conn.execute("DELETE FROM positions")
+        self.conn.execute("DELETE FROM trades")
+        self._set_cash(float(cash))
+        for position in positions:
+            symbol = str(position["symbol"]).upper()
+            exchange = str(position.get("exchange", "NASDAQ")).upper()
+            quantity = float(position["quantity"])
+            entry_price = float(position["entry_price"])
+            last_price_raw = position.get("last_price", entry_price)
+            last_price = float(last_price_raw) if last_price_raw is not None else entry_price
+            highest_price = max(entry_price, last_price)
+            thesis = str(position.get("thesis") or "Synced from Alpaca account snapshot")
+            metadata = dict(position.get("metadata") or {})
+            self.conn.execute(
+                """
+                INSERT INTO positions(symbol, exchange, quantity, entry_price, entry_time, last_price, highest_price, thesis, metadata_json)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (symbol, exchange, quantity, entry_price, timestamp, last_price, highest_price, thesis, json.dumps(metadata, sort_keys=True)),
+            )
+        self.conn.commit()
+
     def _insert_trade(self, symbol: str, exchange: str, side: str, quantity: float, price: float, notional: float, reason: str, timestamp: str, cash_after: float, pnl_realized: float, metadata: dict[str, Any]) -> int:
         cur = self.conn.execute(
             """
