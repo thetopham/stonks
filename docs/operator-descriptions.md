@@ -6,7 +6,7 @@ This page describes what the bot's fields and outputs mean in plain English.
 
 Stonks Paper Bot is a paper-only ranked stock screener. It builds a configured candidate universe, scores each symbol with TradingView MCP technical analysis, ranks candidates, and records BUY/SELL fills in SQLite.
 
-By default, those fills are local simulations only. When `[broker] submit_orders = true`, it submits Alpaca paper market orders to the Alpaca paper endpoint and records only confirmed filled paper orders in the same local ledger. Dashboard and status output are read-only views over the local paper ledger.
+By default, those fills are local simulations only. When `[broker] submit_orders = true`, it submits Alpaca paper market orders to the Alpaca paper endpoint and records only confirmed filled paper orders in the same local ledger. Dashboard and status output are read-only views over the local paper ledger. The options overlay is separate and stricter: it reads Alpaca option chains/quotes and can write local options paper fills, but v1 contains no option order submission path.
 
 ## Signal actions
 
@@ -65,6 +65,7 @@ The dashboard reads the SQLite ledger and config. It does not call TradingView, 
 - `broker.endpoint_env`, `broker.key_env`, `broker.secret_env`: Environment variable names used for the Alpaca paper endpoint and credentials.
 - `broker.paper_only`: Must remain true. Credential loading rejects live Alpaca URLs when this is true.
 - `broker.submit_orders`: Default false. If true with `broker.name="alpaca"`, `run-once` and `watch` submit paper market orders only after the Alpaca clock reports the market is open; unfilled orders are polled, then canceled, and are not written to the local ledger.
+- `[options]`: Defines the options overlay: underlying list, DTE window, spread/open-interest filters, max debit, risk cap, calls/puts enablement, quote feed, and local paper close rules.
 - `[[watchlist]]`: Symbol and exchange pairs always available to the candidate universe.
 
 ## CLI commands
@@ -73,14 +74,19 @@ The dashboard reads the SQLite ledger and config. It does not call TradingView, 
 - `stonks-paper run-once --config config.paper.toml`: Starts TradingView MCP, scans the configured universe once, records local simulated fills or confirmed Alpaca paper fills, and prints a scan report.
 - `stonks-paper watch --config config.paper.toml`: Repeats `run-once` forever using `execution.scan_interval_seconds`; with `broker.submit_orders=true`, this is the autonomous Alpaca paper-order loop.
 - `stonks-paper status --config config.paper.toml`: Reads only the local SQLite ledger and prints cash, open positions, equity estimate, and realized PnL.
+- `stonks-paper options-scan --config config.paper.toml`: Read-only options scan; starts TradingView MCP, reads Alpaca option chains/quotes, prints defined-risk candidates, and writes no trades.
+- `stonks-paper options-paper --config config.paper.toml`: Local options paper loop; records simulated long call/put opens/closes in `option_*` tables and submits no Alpaca option orders.
+- `stonks-paper options-status --config config.paper.toml`: Reads only the local options paper ledger and prints option cash, open option positions, max loss, and PnL.
 - `stonks-paper dashboard --config config.paper.toml --host 0.0.0.0 --port 8791`: Serves the read-only dashboard.
 - `stonks-paper alpaca-check --config config.paper.toml --env .env`: Performs a read-only Alpaca paper account credential check and prints account status/equity/buying power without printing credentials or submitting orders. It also searches `.env`, `~/.hermes/.env`, `~/.hermes/hermes-agent/.env`, and `~/hermes-workspace/.env`.
 
 ## Ledger tables
 
-- `state`: Stores paper cash.
-- `positions`: Stores currently open paper positions, one row per symbol.
-- `trades`: Stores append-only simulated BUY/SELL fills.
+- `state`: Stores equity paper cash and separate `options_cash`.
+- `positions`: Stores currently open equity paper positions, one row per symbol.
+- `trades`: Stores append-only simulated equity BUY/SELL fills.
+- `option_positions`: Stores currently open local options paper positions, one row per contract symbol.
+- `option_trades`: Stores append-only local options BUY_TO_OPEN/SELL_TO_CLOSE fills.
 
 ## Service descriptions
 

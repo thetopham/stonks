@@ -16,6 +16,7 @@ from .alpaca import (
 )
 from .config import load_config
 from .ledger import PaperLedger
+from .options import OptionsPaperLedger, format_options_status, options_paper_once, options_scan_once
 from .dashboard import serve_dashboard
 from .mcp_client import TradingViewMCPProvider
 from .runner import format_status, run_once, screen_once
@@ -50,6 +51,37 @@ async def _screen_once(config_path: Path) -> str:
             return await screen_once(config, ledger, provider)
     finally:
         ledger.close()
+
+
+def _build_options_data_client(config_path: Path, env_paths=None):
+    load_default_env_files(config_path, extra_paths=env_paths)
+    config = load_config(config_path)
+    credentials = load_alpaca_credentials(config.broker)
+    return config, AlpacaPaperClient(credentials)
+
+
+async def _options_scan(config_path: Path, env_paths=None) -> str:
+    config, client = _build_options_data_client(config_path, env_paths)
+    ledger = PaperLedger(config.ledger_path, starting_cash=config.starting_cash)
+    options_ledger = OptionsPaperLedger(config.ledger_path, starting_cash=config.starting_cash)
+    try:
+        async with TradingViewMCPProvider(config.provider.command, config.provider.args, config.provider.timeframe) as provider:
+            return await options_scan_once(config, ledger, options_ledger, provider, client)
+    finally:
+        ledger.close()
+        options_ledger.close()
+
+
+async def _options_paper(config_path: Path, env_paths=None) -> str:
+    config, client = _build_options_data_client(config_path, env_paths)
+    ledger = PaperLedger(config.ledger_path, starting_cash=config.starting_cash)
+    options_ledger = OptionsPaperLedger(config.ledger_path, starting_cash=config.starting_cash)
+    try:
+        async with TradingViewMCPProvider(config.provider.command, config.provider.args, config.provider.timeframe) as provider:
+            return await options_paper_once(config, ledger, options_ledger, provider, client)
+    finally:
+        ledger.close()
+        options_ledger.close()
 
 
 async def _watch(config_path: Path) -> None:
@@ -119,6 +151,17 @@ def main(argv: list[str] | None = None) -> int:
     status = sub.add_parser("status", help="print local paper ledger status without network calls")
     status.add_argument("--config", type=Path, default=Path("config.paper.toml"))
 
+    options_scan = sub.add_parser("options-scan", help="read-only Alpaca option-chain scan from equity signals; no ledger writes")
+    options_scan.add_argument("--config", type=Path, default=Path("config.paper.toml"))
+    options_scan.add_argument("--env", type=Path, action="append", default=None, help="extra env file to load before .env and Hermes defaults; can be repeated")
+
+    options_paper = sub.add_parser("options-paper", help="paper-trade defined-risk long options locally; no option broker orders")
+    options_paper.add_argument("--config", type=Path, default=Path("config.paper.toml"))
+    options_paper.add_argument("--env", type=Path, action="append", default=None, help="extra env file to load before .env and Hermes defaults; can be repeated")
+
+    options_status = sub.add_parser("options-status", help="print local options paper ledger status without network calls")
+    options_status.add_argument("--config", type=Path, default=Path("config.paper.toml"))
+
     watch = sub.add_parser("watch", help="run autonomous paper scans forever until interrupted")
     watch.add_argument("--config", type=Path, default=Path("config.paper.toml"))
 
@@ -161,6 +204,28 @@ def main(argv: list[str] | None = None) -> int:
         config = load_config(args.config)
         ledger = PaperLedger(config.ledger_path, starting_cash=config.starting_cash)
         print(format_status(config, ledger))
+        return 0
+
+    if args.command == "options-scan":
+        try:
+            print(asyncio.run(_options_scan(args.config, args.env)))
+        except AlpacaConfigError as exc:
+            print(f"Alpaca options scan failed: {exc}", file=sys.stderr)
+            return 2
+        return 0
+
+    if args.command == "options-paper":
+        try:
+            print(asyncio.run(_options_paper(args.config, args.env)))
+        except AlpacaConfigError as exc:
+            print(f"Alpaca options paper failed: {exc}", file=sys.stderr)
+            return 2
+        return 0
+
+    if args.command == "options-status":
+        config = load_config(args.config)
+        options_ledger = OptionsPaperLedger(config.ledger_path, starting_cash=config.starting_cash)
+        print(format_options_status(config, options_ledger))
         return 0
 
     if args.command == "watch":

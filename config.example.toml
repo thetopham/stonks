@@ -43,6 +43,31 @@ cash_reserve_pct = 0.05
 max_new_buys_per_scan = 3
 min_position_notional = 25
 
+[options]
+# Defined-risk options overlay. Commands using this section are paper/read-only only:
+#   stonks-paper options-scan   # read-only chain scan
+#   stonks-paper options-paper  # local options paper ledger, no broker option orders
+#   stonks-paper options-status # local ledger status only
+enabled = true
+underlying_symbols = ["SPY", "QQQ", "IWM", "AAPL", "MSFT", "NVDA", "AMD", "TSLA", "META", "AMZN", "GOOGL"]
+min_dte = 30
+max_dte = 60
+target_dte = 45
+min_open_interest = 100
+max_spread_pct = 0.20
+max_contract_debit = 750
+max_trade_risk_pct = 0.01
+contracts_per_trade = 1
+max_open_positions = 5
+allow_calls = true
+allow_puts = true
+quote_feed = "indicative"
+stop_loss_pct = 0.50
+take_profit_pct = 0.50
+min_exit_dte = 14
+strike_pct_window = 0.15
+max_underlyings_per_scan = 20
+
 [provider]
 command = "/home/matt/.local/bin/uvx"
 args = ["--from", "tradingview-mcp-server", "tradingview-mcp"]

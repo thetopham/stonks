@@ -71,6 +71,31 @@ class BrokerConfig:
 
 
 @dataclass(slots=True)
+class OptionsConfig:
+    enabled: bool = False
+    underlying_symbols: list[str] = field(
+        default_factory=lambda: ["SPY", "QQQ", "IWM", "AAPL", "MSFT", "NVDA", "AMD", "TSLA", "META", "AMZN", "GOOGL"]
+    )
+    min_dte: int = 30
+    max_dte: int = 60
+    target_dte: int = 45
+    min_open_interest: float = 100.0
+    max_spread_pct: float = 0.20
+    max_contract_debit: float = 750.0
+    max_trade_risk_pct: float = 0.01
+    contracts_per_trade: int = 1
+    max_open_positions: int = 5
+    allow_calls: bool = True
+    allow_puts: bool = True
+    quote_feed: str = "indicative"
+    stop_loss_pct: float = 0.50
+    take_profit_pct: float = 0.50
+    min_exit_dte: int = 14
+    strike_pct_window: float = 0.15
+    max_underlyings_per_scan: int = 20
+
+
+@dataclass(slots=True)
 class BotConfig:
     ledger_path: Path
     starting_cash: float = 100_000.0
@@ -85,6 +110,7 @@ class BotConfig:
     optimizer: OptimizerConfig = field(default_factory=OptimizerConfig)
     provider: ProviderConfig = field(default_factory=ProviderConfig)
     broker: BrokerConfig = field(default_factory=BrokerConfig)
+    options: OptionsConfig = field(default_factory=OptionsConfig)
     watchlist: list[WatchItem] = field(default_factory=list)
 
 
@@ -188,6 +214,38 @@ def load_config(path: str | Path) -> BotConfig:
     if broker.submit_orders and broker.name != "alpaca":
         raise ValueError("broker order submission currently supports only Alpaca paper accounts")
 
+    options_data = data.get("options", {})
+    options = OptionsConfig(
+        enabled=bool(options_data.get("enabled", False)),
+        underlying_symbols=_str_list(
+            options_data.get("underlying_symbols", OptionsConfig().underlying_symbols), upper=True
+        )
+        or OptionsConfig().underlying_symbols,
+        min_dte=max(0, int(options_data.get("min_dte", 30))),
+        max_dte=max(1, int(options_data.get("max_dte", 60))),
+        target_dte=max(1, int(options_data.get("target_dte", 45))),
+        min_open_interest=max(0.0, float(options_data.get("min_open_interest", 100.0))),
+        max_spread_pct=max(0.0, float(options_data.get("max_spread_pct", 0.20))),
+        max_contract_debit=max(0.0, float(options_data.get("max_contract_debit", 750.0))),
+        max_trade_risk_pct=max(0.0, min(1.0, float(options_data.get("max_trade_risk_pct", 0.01)))),
+        contracts_per_trade=max(1, int(options_data.get("contracts_per_trade", 1))),
+        max_open_positions=max(0, int(options_data.get("max_open_positions", 5))),
+        allow_calls=bool(options_data.get("allow_calls", True)),
+        allow_puts=bool(options_data.get("allow_puts", True)),
+        quote_feed=str(options_data.get("quote_feed", "indicative")).strip().lower() or "indicative",
+        stop_loss_pct=max(0.0, float(options_data.get("stop_loss_pct", 0.50))),
+        take_profit_pct=max(0.0, float(options_data.get("take_profit_pct", 0.50))),
+        min_exit_dte=max(0, int(options_data.get("min_exit_dte", 14))),
+        strike_pct_window=max(0.01, float(options_data.get("strike_pct_window", 0.15))),
+        max_underlyings_per_scan=max(1, int(options_data.get("max_underlyings_per_scan", 20))),
+    )
+    if options.max_dte < options.min_dte:
+        raise ValueError("options.max_dte must be greater than or equal to options.min_dte")
+    if not options.allow_calls and not options.allow_puts:
+        raise ValueError("options must allow calls, puts, or both")
+    if options.quote_feed not in {"indicative", "opra"}:
+        raise ValueError("options.quote_feed must be 'indicative' or 'opra'")
+
     watchlist = [
         WatchItem(symbol=str(item["symbol"]).upper(), exchange=str(item.get("exchange", "NASDAQ")).upper())
         for item in data.get("watchlist", [])
@@ -209,5 +267,6 @@ def load_config(path: str | Path) -> BotConfig:
         optimizer=optimizer,
         provider=provider,
         broker=broker,
+        options=options,
         watchlist=watchlist,
     )

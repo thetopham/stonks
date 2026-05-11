@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import time
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from .config import BrokerConfig
@@ -163,13 +164,24 @@ def load_alpaca_credentials(broker: BrokerConfig) -> AlpacaCredentials:
 
 
 class AlpacaPaperClient:
-    def __init__(self, credentials: AlpacaCredentials, timeout_seconds: int = 15, poll_attempts: int = 4, poll_delay_seconds: float = 1.0):
+    def __init__(
+        self,
+        credentials: AlpacaCredentials,
+        timeout_seconds: int = 15,
+        poll_attempts: int = 4,
+        poll_delay_seconds: float = 1.0,
+        data_endpoint: str = "https://data.alpaca.markets/v1beta1",
+    ):
         self.credentials = credentials
         self.timeout_seconds = timeout_seconds
         self.poll_attempts = poll_attempts
         self.poll_delay_seconds = poll_delay_seconds
+        self.data_endpoint = data_endpoint.rstrip("/")
 
     def _request_json(self, path: str, *, method: str = "GET", payload: dict | None = None) -> dict:
+        return self._request_json_url(f"{self.credentials.endpoint}{path}", path, method=method, payload=payload)
+
+    def _request_json_url(self, url: str, label: str, *, method: str = "GET", payload: dict | None = None) -> dict:
         data = json.dumps(payload).encode("utf-8") if payload is not None else None
         headers = {
             "APCA-API-KEY-ID": self.credentials.key,
@@ -179,7 +191,7 @@ class AlpacaPaperClient:
         if payload is not None:
             headers["Content-Type"] = "application/json"
         request = Request(
-            f"{self.credentials.endpoint}{path}",
+            url,
             data=data,
             headers=headers,
             method=method,
@@ -189,13 +201,13 @@ class AlpacaPaperClient:
                 body = response.read().decode("utf-8")
         except HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")[:300]
-            raise AlpacaConfigError(f"Alpaca request to {path} failed with HTTP {exc.code}: {detail}") from exc
+            raise AlpacaConfigError(f"Alpaca request to {label} failed with HTTP {exc.code}: {detail}") from exc
         except URLError as exc:
-            raise AlpacaConfigError(f"Alpaca request to {path} failed: {exc.reason}") from exc
+            raise AlpacaConfigError(f"Alpaca request to {label} failed: {exc.reason}") from exc
         try:
             return json.loads(body)
         except json.JSONDecodeError as exc:
-            raise AlpacaConfigError(f"Alpaca request to {path} returned invalid JSON") from exc
+            raise AlpacaConfigError(f"Alpaca request to {label} returned invalid JSON") from exc
 
     def get_account(self) -> dict:
         return self._request_json("/account")
@@ -208,6 +220,68 @@ class AlpacaPaperClient:
 
     def get_clock(self) -> dict:
         return self._request_json("/clock")
+
+    def get_options_contracts(
+        self,
+        underlying_symbols: list[str],
+        contract_type: str,
+        expiration_date_gte: str,
+        expiration_date_lte: str,
+        strike_price_gte: float | None = None,
+        strike_price_lte: float | None = None,
+        limit: int = 1000,
+        max_pages: int = 3,
+    ) -> list[dict]:
+        symbols = [symbol.upper() for symbol in underlying_symbols if symbol]
+        if not symbols:
+            return []
+        if contract_type not in {"call", "put"}:
+            raise AlpacaConfigError("option contract_type must be call or put")
+        params: dict[str, str | int | float] = {
+            "underlying_symbols": ",".join(symbols),
+            "type": contract_type,
+            "status": "active",
+            "expiration_date_gte": expiration_date_gte,
+            "expiration_date_lte": expiration_date_lte,
+            "limit": max(1, min(int(limit), 10000)),
+        }
+        if strike_price_gte is not None:
+            params["strike_price_gte"] = round(float(strike_price_gte), 2)
+        if strike_price_lte is not None:
+            params["strike_price_lte"] = round(float(strike_price_lte), 2)
+
+        contracts: list[dict] = []
+        page_token: str | None = None
+        for _ in range(max(1, max_pages)):
+            page_params = dict(params)
+            if page_token:
+                page_params["page_token"] = page_token
+            path = "/options/contracts?" + urlencode(page_params)
+            response = self._request_json(path)
+            page_contracts = response.get("option_contracts", []) if isinstance(response, dict) else []
+            if not isinstance(page_contracts, list):
+                raise AlpacaConfigError("Alpaca options contracts endpoint returned invalid JSON shape")
+            contracts.extend(contract for contract in page_contracts if isinstance(contract, dict))
+            page_token = str(response.get("page_token") or "") if isinstance(response, dict) else ""
+            if not page_token:
+                break
+        return contracts
+
+    def get_latest_option_quotes(self, symbols: list[str], feed: str = "indicative") -> dict[str, dict]:
+        clean_symbols = [symbol.upper() for symbol in symbols if symbol]
+        if not clean_symbols:
+            return {}
+        if len(clean_symbols) > 100:
+            raise AlpacaConfigError("Alpaca latest option quotes accepts at most 100 symbols per request")
+        if feed not in {"indicative", "opra"}:
+            raise AlpacaConfigError("option quote feed must be indicative or opra")
+        params = urlencode({"symbols": ",".join(clean_symbols), "feed": feed})
+        url = f"{self.data_endpoint}/options/quotes/latest?{params}"
+        response = self._request_json_url(url, "/options/quotes/latest")
+        quotes = response.get("quotes", {}) if isinstance(response, dict) else {}
+        if not isinstance(quotes, dict):
+            raise AlpacaConfigError("Alpaca latest option quotes endpoint returned invalid JSON shape")
+        return {str(symbol).upper(): quote for symbol, quote in quotes.items() if isinstance(quote, dict)}
 
     def get_order(self, order_id: str) -> dict:
         return self._request_json(f"/orders/{order_id}")

@@ -228,3 +228,73 @@ def test_get_positions_reads_alpaca_positions_endpoint(monkeypatch):
 
     assert requested_paths == [("/positions", "GET", None)]
     assert positions == [{"symbol": "AAPL", "qty": "2", "avg_entry_price": "150.25"}]
+
+
+def test_get_options_contracts_queries_paper_contract_endpoint(monkeypatch):
+    credentials = alpaca_module.AlpacaCredentials(
+        endpoint="https://paper-api.alpaca.markets/v2",
+        key="paper-key",
+        secret="paper-secret",
+    )
+    client = AlpacaPaperClient(credentials)
+    requested_paths = []
+
+    def fake_request(path, *, method="GET", payload=None):
+        requested_paths.append(path)
+        return {
+            "option_contracts": [
+                {
+                    "symbol": "AAPL260620C00105000",
+                    "underlying_symbol": "AAPL",
+                    "type": "call",
+                    "expiration_date": "2026-06-20",
+                    "strike_price": "105",
+                }
+            ]
+        }
+
+    monkeypatch.setattr(client, "_request_json", fake_request)
+
+    contracts = client.get_options_contracts(
+        ["AAPL"],
+        "call",
+        "2026-06-10",
+        "2026-07-10",
+        strike_price_gte=85.0,
+        strike_price_lte=115.0,
+        limit=500,
+    )
+
+    assert len(contracts) == 1
+    assert contracts[0]["symbol"] == "AAPL260620C00105000"
+    assert requested_paths == [
+        "/options/contracts?underlying_symbols=AAPL&type=call&status=active&expiration_date_gte=2026-06-10&expiration_date_lte=2026-07-10&limit=500&strike_price_gte=85.0&strike_price_lte=115.0"
+    ]
+
+
+def test_get_latest_option_quotes_uses_alpaca_data_endpoint(monkeypatch):
+    credentials = alpaca_module.AlpacaCredentials(
+        endpoint="https://paper-api.alpaca.markets/v2",
+        key="paper-key",
+        secret="paper-secret",
+    )
+    client = AlpacaPaperClient(credentials, data_endpoint="https://data.alpaca.markets/v1beta1")
+    requested = []
+
+    def fake_request_url(url, label, *, method="GET", payload=None):
+        requested.append((url, label, method, payload))
+        return {"quotes": {"AAPL260620C00105000": {"bp": 1.2, "ap": 1.3}}}
+
+    monkeypatch.setattr(client, "_request_json_url", fake_request_url)
+
+    quotes = client.get_latest_option_quotes(["AAPL260620C00105000"], feed="indicative")
+
+    assert quotes == {"AAPL260620C00105000": {"bp": 1.2, "ap": 1.3}}
+    assert requested == [
+        (
+            "https://data.alpaca.markets/v1beta1/options/quotes/latest?symbols=AAPL260620C00105000&feed=indicative",
+            "/options/quotes/latest",
+            "GET",
+            None,
+        )
+    ]
