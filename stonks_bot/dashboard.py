@@ -12,11 +12,12 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from .config import BotConfig, load_config
+from .farm import collect_farm_status
 from .ledger import PaperLedger
 from .options import OptionsPaperLedger
 
 PAPER_BOUNDARY = "PAPER ONLY — no live endpoint"
-DEFAULT_SERVICE_NAMES = ["stonks-paper-bot.service", "stonks-paper-dashboard.service"]
+DEFAULT_SERVICE_NAMES = ["stonks-paper-bot.service", "stonks-paper-dashboard.service", "stonks-paper-farm.service"]
 
 
 def _money(value: float) -> str:
@@ -85,6 +86,7 @@ def collect_dashboard_data(
     ledger: PaperLedger,
     service_names: list[str] | None = None,
     options_ledger: OptionsPaperLedger | None = None,
+    farm_dir: Path | None = None,
 ) -> dict[str, Any]:
     positions = ledger.list_positions()
     trades = ledger.list_trades()
@@ -118,6 +120,8 @@ def collect_dashboard_data(
                 "drawdown_from_peak_pct": _round(drawdown_pct),
                 "thesis": position.thesis,
                 "score": position.metadata.get("score"),
+                "asset_class": position.metadata.get("asset_class", "equity"),
+                "broker_symbol": position.metadata.get("broker_symbol"),
             }
         )
 
@@ -135,6 +139,8 @@ def collect_dashboard_data(
             "cash_after": _round(trade.cash_after),
             "pnl_realized": _round(trade.pnl_realized),
             "score": trade.metadata.get("score"),
+            "asset_class": trade.metadata.get("asset_class", "equity"),
+            "broker_symbol": trade.metadata.get("broker_symbol"),
         }
         for trade in reversed(trades[-25:])
     ]
@@ -211,6 +217,8 @@ def collect_dashboard_data(
             options_ledger.close()
 
     services = [_systemctl_user_status(name) for name in service_names] if service_names is not None else [_systemctl_user_status(name) for name in DEFAULT_SERVICE_NAMES]
+    farm_path = farm_dir if farm_dir is not None else Path("configs/farm")
+    farm_status = collect_farm_status(farm_path) if farm_path.exists() else None
 
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -288,6 +296,7 @@ def collect_dashboard_data(
             "timeframe": config.provider.timeframe,
         },
         "services": services,
+        "strategy_farm": farm_status,
     }
 
 
@@ -322,6 +331,29 @@ def _trade_row(trade: dict[str, Any]) -> str:
       <td>{trade['quantity']} @ {_money(trade['price'])}{pnl}</td>
       <td>{escape(trade['timestamp'])}</td>
       <td>{escape(trade['reason'])}</td>
+    </tr>
+    """
+
+
+def _farm_row(variant: dict[str, Any]) -> str:
+    if not variant.get("safe_shadow"):
+        return f"""
+        <tr>
+          <td><strong>{escape(str(variant.get('name', 'unknown')))}</strong></td>
+          <td colspan="6" class="bad">{escape(str(variant.get('error', 'unsafe or invalid variant')))}</td>
+        </tr>
+        """
+    latest = variant.get("latest_trade_at") or "—"
+    return_class = "good" if float(variant.get("total_return_pct", 0)) >= 0 else "bad"
+    return f"""
+    <tr>
+      <td><strong>{escape(str(variant['name']))}</strong><br><small>{escape(str(variant.get('description') or 'shadow split test'))}</small></td>
+      <td>{escape(str(variant['timeframe']))} / {int(float(variant['cadence_minutes']))}m</td>
+      <td class="{return_class}">{_pct(float(variant['total_return_pct']))}</td>
+      <td>{_money(float(variant['equity']))}</td>
+      <td>{variant['open_positions']} open / {variant['trades_recorded']} trades</td>
+      <td>{escape(str(latest))}</td>
+      <td><small>{escape(str(variant.get('ledger_path', '')))}</small></td>
     </tr>
     """
 
@@ -381,6 +413,9 @@ def render_dashboard_html(data: dict[str, Any], api_path: str = "/api/dashboard"
     ) or "<span class=\"muted\">Service state not checked</span>"
     positions_html = "".join(_position_card(position) for position in data["positions"]) or '<article class="card"><h3>No open paper positions</h3><p class="muted">The autonomous loop is watching for qualifying entries.</p></article>'
     trades_html = "".join(_trade_row(trade) for trade in data["recent_trades"]) or '<tr><td colspan="6" class="muted">No paper trades recorded yet.</td></tr>'
+    farm = data.get("strategy_farm") or {}
+    farm_rows = farm.get("leaderboard") or farm.get("variants") or []
+    farm_html = "".join(_farm_row(variant) for variant in farm_rows) or '<tr><td colspan="7" class="muted">No strategy-farm variants configured yet.</td></tr>'
     option_positions_html = "".join(_option_position_card(position) for position in options.get("positions", [])) or '<article class="card"><h3>No open option positions</h3><p class="muted">The options overlay is waiting for a qualifying long call/put setup.</p></article>'
     option_trades_html = "".join(_option_trade_row(trade) for trade in options.get("recent_trades", [])) or '<tr><td colspan="6" class="muted">No option trades recorded yet.</td></tr>'
     options_mode = "Alpaca paper orders" if options.get("submit_orders") else "local paper ledger"
@@ -479,6 +514,10 @@ def render_dashboard_html(data: dict[str, Any], api_path: str = "/api/dashboard"
     <article class="card"><div class="label">Stops</div><div class="metric">-{data['strategy']['stop_loss_pct'] * 100:.0f}% / +{data['strategy']['take_profit_pct'] * 100:.0f}%</div><small>Stop loss / take profit</small></article>
     <article class="card"><div class="label">Cadence</div><div class="metric">{int(data['strategy']['scan_interval_seconds'] / 60)}m</div><small>{escape(data['strategy']['timeframe'])} analysis timeframe</small></article>
   </section>
+
+  <h2>Strategy Farm</h2>
+  <p class="muted">Shadow split tests use separate SQLite ledgers and are forced to local-paper mode: no broker orders, no options auto-trading.</p>
+  <article class="card"><table><thead><tr><th>Variant</th><th>TF / Cadence</th><th>Return</th><th>Equity</th><th>Activity</th><th>Latest Trade</th><th>Ledger</th></tr></thead><tbody>{farm_html}</tbody></table></article>
 
   <h2>Recent Paper Trades</h2>
   <article class="card"><table><thead><tr><th>ID</th><th>Symbol</th><th>Side</th><th>Fill</th><th>Time</th><th>Reason</th></tr></thead><tbody>{trades_html}</tbody></table></article>

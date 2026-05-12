@@ -1,0 +1,35 @@
+extends = "../../config.paper.toml"
+name = "aggressive-15m-1h"
+description = "Aggressive test: 1h analysis, 15m cadence, easier entry and tighter exits."
+enabled = true
+ledger_path = "data/farm/aggressive-15m-1h.sqlite3"
+
+[execution]
+dry_run = true
+live_trading_enabled = false
+scan_interval_seconds = 900
+initial_delay_seconds = 840
+
+[provider]
+timeframe = "1h"
+
+[strategy]
+entry_score = 60
+exit_score = 35
+max_rsi_for_entry = 75
+stop_loss_pct = 0.05
+take_profit_pct = 0.10
+
+[screener]
+source = "curated"
+universes = ["indices", "watchlist"]
+max_candidates = 50
+
+[broker]
+submit_orders = false
+equity_extended_hours = false
+
+[options]
+enabled = false
+auto_trade = false
+submit_orders = false

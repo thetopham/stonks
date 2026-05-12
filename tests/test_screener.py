@@ -46,6 +46,28 @@ def test_mcp_source_static_universe_uses_watchlist_only(tmp_path):
     assert [(item.symbol, item.exchange) for item in candidates] == [("AAPL", "NASDAQ"), ("QQQ", "NASDAQ")]
 
 
+def test_indices_universe_adds_core_index_etfs_without_full_market_scan(tmp_path):
+    config = _config(tmp_path)
+    config.screener = ScreenerConfig(
+        enabled=True,
+        source="curated",
+        universes=["indices", "watchlist"],
+        max_candidates=8,
+        exclude_symbols=[],
+    )
+
+    candidates = build_static_candidate_universe(config)
+
+    assert [(item.symbol, item.exchange) for item in candidates] == [
+        ("SPY", "NYSE"),
+        ("QQQ", "NASDAQ"),
+        ("IWM", "NYSE"),
+        ("DIA", "NYSE"),
+        ("VTI", "NYSE"),
+        ("AAPL", "NASDAQ"),
+    ]
+
+
 def test_merge_candidate_universes_caps_dynamic_candidates_but_protects_open_positions(tmp_path):
     config = _config(tmp_path)
     config.screener.max_candidates = 2
@@ -66,3 +88,26 @@ def test_normalize_watch_item_parses_tradingview_exchange_prefix_and_skips_prefe
     assert normalize_watch_item("NASDAQ:AAPL", "NYSE") == WatchItem("AAPL", "NASDAQ")
     assert normalize_watch_item("NYSE:BRK.B", "NYSE") == WatchItem("BRK.B", "NYSE")
     assert normalize_watch_item("NYSE:ABR/PD", "NYSE") is None
+
+
+def test_normalize_watch_item_accepts_crypto_pairs_and_infers_asset_class():
+    item = normalize_watch_item("BINANCE:BTC/USDT", "NASDAQ")
+
+    assert item is not None
+    assert item.symbol == "BTCUSDT"
+    assert item.exchange == "BINANCE"
+    assert item.asset_class == "crypto"
+
+
+def test_static_candidate_universe_can_include_curated_crypto_basket(tmp_path):
+    config = _config(tmp_path)
+    config.screener.universes = ["crypto_major"]
+    config.screener.max_candidates = 3
+
+    candidates = build_static_candidate_universe(config)
+
+    assert [(item.symbol, item.exchange, item.asset_class, item.broker_symbol) for item in candidates] == [
+        ("BTCUSDT", "BINANCE", "crypto", "BTC/USD"),
+        ("ETHUSDT", "BINANCE", "crypto", "ETH/USD"),
+        ("SOLUSDT", "BINANCE", "crypto", "SOL/USD"),
+    ]

@@ -10,7 +10,13 @@ slippage_pct = 0.02
 [execution]
 dry_run = true
 live_trading_enabled = false
-scan_interval_seconds = 900
+# Equity symbols pause outside 4:00 AM-8:00 PM ET; crypto symbols remain active.
+market_hours_only = true
+market_timezone = "America/New_York"
+market_open = "04:00"
+market_close = "20:00"
+# Active paper cadence: scan every 30 minutes using 4h technical analysis.
+scan_interval_seconds = 1800
 
 [strategy]
 entry_score = 65
@@ -30,12 +36,13 @@ preview_top = 10
 # hybrid = MCP screeners plus curated local baskets.
 enabled = false
 source = "curated"
-universes = ["watchlist", "etf_core", "nasdaq_mega", "nyse_mega", "ai_infra"]
-exchanges = ["NASDAQ", "NYSE"]
-dynamic_sources = ["rating_strong_buy", "rating_buy", "volume_breakout", "smart_volume", "top_gainers"]
-per_source_limit = 50
-max_candidates = 100
+universes = ["indices", "watchlist"]
+exchanges = ["NASDAQ", "NYSE", "BINANCE", "KUCOIN"]
+dynamic_sources = []
+per_source_limit = 10
+max_candidates = 50
 exclude_symbols = []
+
 
 [optimizer]
 enabled = true
@@ -77,7 +84,16 @@ max_underlyings_per_scan = 20
 [provider]
 command = "/home/matt/.local/bin/uvx"
 args = ["--from", "tradingview-mcp-server", "tradingview-mcp"]
-timeframe = "1D"
+timeframe = "4h"
+
+[provider.cache]
+enabled = true
+path = "data/provider-cache.sqlite3"
+ttl_seconds = 300
+stale_seconds = 21600
+rate_limit_cooldown_seconds = 900
+min_upstream_interval_seconds = 5
+allow_stale_on_error = true
 
 [broker]
 name = "alpaca"
@@ -86,6 +102,9 @@ key_env = "alpaca_key"
 secret_env = "alpaca_secret"
 paper_only = true
 submit_orders = false
+# Alpaca 24/5 equity trading/overnight orders require account support and use limit orders.
+equity_extended_hours = false
+equity_extended_hours_time_in_force = "day"
 
 [[watchlist]]
 symbol = "AAPL"
@@ -98,3 +117,15 @@ exchange = "NASDAQ"
 [[watchlist]]
 symbol = "SPY"
 exchange = "NYSE"
+
+[[watchlist]]
+symbol = "BTCUSDT"
+exchange = "BINANCE"
+asset_class = "crypto"
+broker_symbol = "BTC/USD"
+
+[[watchlist]]
+symbol = "ETHUSDT"
+exchange = "BINANCE"
+asset_class = "crypto"
+broker_symbol = "ETH/USD"

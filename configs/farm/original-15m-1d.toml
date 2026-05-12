@@ -1,0 +1,28 @@
+extends = "../../config.paper.toml"
+name = "original-15m-1d"
+description = "Original baseline: 15m scan cadence with 1d TradingView analysis."
+enabled = true
+ledger_path = "data/farm/original-15m-1d.sqlite3"
+
+[execution]
+dry_run = true
+live_trading_enabled = false
+scan_interval_seconds = 900
+initial_delay_seconds = 0
+
+[provider]
+timeframe = "1d"
+
+[screener]
+source = "curated"
+universes = ["indices", "watchlist"]
+max_candidates = 50
+
+[broker]
+submit_orders = false
+equity_extended_hours = false
+
+[options]
+enabled = false
+auto_trade = false
+submit_orders = false

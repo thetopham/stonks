@@ -1,0 +1,28 @@
+extends = "../../config.paper.toml"
+name = "active-15m-4h"
+description = "Same 4h signal bars as control, but faster 15m scan cadence."
+enabled = true
+ledger_path = "data/farm/active-15m-4h.sqlite3"
+
+[execution]
+dry_run = true
+live_trading_enabled = false
+scan_interval_seconds = 900
+initial_delay_seconds = 240
+
+[provider]
+timeframe = "4h"
+
+[screener]
+source = "curated"
+universes = ["indices", "watchlist"]
+max_candidates = 50
+
+[broker]
+submit_orders = false
+equity_extended_hours = false
+
+[options]
+enabled = false
+auto_trade = false
+submit_orders = false

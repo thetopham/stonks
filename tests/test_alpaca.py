@@ -1,9 +1,19 @@
 import json
 import os
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import stonks_bot.alpaca as alpaca_module
-from stonks_bot.alpaca import AlpacaConfigError, AlpacaPaperClient, default_env_paths, load_alpaca_credentials, load_dotenv, load_env_files
+from stonks_bot.alpaca import (
+    AlpacaConfigError,
+    AlpacaPaperClient,
+    alpaca_equity_24_5_is_open,
+    default_env_paths,
+    load_alpaca_credentials,
+    load_dotenv,
+    load_env_files,
+)
 from stonks_bot.config import BrokerConfig
 
 
@@ -158,6 +168,81 @@ def test_submit_market_order_posts_sanitized_paper_order_to_alpaca(monkeypatch):
     assert fill.quantity == 4.2
     assert fill.price == 125.50
     assert fill.notional == 527.10
+
+
+def test_alpaca_equity_24_5_schedule_matches_sunday_evening_to_friday_evening_window():
+    eastern = ZoneInfo("America/New_York")
+
+    assert alpaca_equity_24_5_is_open(datetime(2026, 5, 10, 19, 59, tzinfo=eastern)) is False
+    assert alpaca_equity_24_5_is_open(datetime(2026, 5, 10, 20, 0, tzinfo=eastern)) is True
+    assert alpaca_equity_24_5_is_open(datetime(2026, 5, 13, 2, 0, tzinfo=eastern)) is True
+    assert alpaca_equity_24_5_is_open(datetime(2026, 5, 15, 19, 59, tzinfo=eastern)) is True
+    assert alpaca_equity_24_5_is_open(datetime(2026, 5, 15, 20, 0, tzinfo=eastern)) is False
+    assert alpaca_equity_24_5_is_open(datetime(2026, 5, 16, 12, 0, tzinfo=eastern)) is False
+
+
+def test_market_is_open_can_treat_regular_closed_clock_as_24_5_extended_hours(monkeypatch):
+    credentials = alpaca_module.AlpacaCredentials(
+        endpoint="https://paper-api.alpaca.markets/v2",
+        key="paper-key",
+        secret="paper-secret",
+    )
+    client = AlpacaPaperClient(credentials)
+    monkeypatch.setattr(client, "get_clock", lambda: {"is_open": False, "next_open": "2026-05-11T09:30:00-04:00"})
+    monkeypatch.setattr(
+        alpaca_module,
+        "alpaca_equity_24_5_is_open",
+        lambda now=None: True,
+    )
+
+    is_open, reason = client.market_is_open(extended_hours=True)
+
+    assert is_open is True
+    assert "24/5" in reason
+
+
+def test_submit_equity_extended_hours_limit_order_uses_limit_extended_hours_payload(monkeypatch):
+    credentials = alpaca_module.AlpacaCredentials(
+        endpoint="https://paper-api.alpaca.markets/v2",
+        key="paper-key",
+        secret="paper-secret",
+    )
+    client = AlpacaPaperClient(credentials)
+    captured = []
+
+    def fake_request(path, *, method="GET", payload=None):
+        captured.append((path, method, payload))
+        return {
+            "id": "extended-order-123",
+            "symbol": "AAPL",
+            "side": "buy",
+            "status": "filled",
+            "filled_qty": "4.2",
+            "filled_avg_price": "125.50",
+        }
+
+    monkeypatch.setattr(client, "_request_json", fake_request)
+
+    fill = client.submit_extended_hours_buy("aapl", notional=527.10, limit_price=126.25, time_in_force="day")
+
+    assert captured == [
+        (
+            "/orders",
+            "POST",
+            {
+                "symbol": "AAPL",
+                "side": "buy",
+                "type": "limit",
+                "limit_price": "126.25",
+                "time_in_force": "day",
+                "extended_hours": True,
+                "notional": "527.10",
+            },
+        )
+    ]
+    assert fill.order_id == "extended-order-123"
+    assert fill.quantity == 4.2
+    assert fill.price == 125.50
 
 
 def test_submit_market_order_cancels_unfilled_order_and_raises_without_fill(monkeypatch):
@@ -343,3 +428,47 @@ def test_submit_option_limit_order_posts_single_leg_alpaca_paper_order(monkeypat
     assert fill.quantity == 1
     assert fill.price == 1.25
     assert fill.notional == 125.0
+
+
+def test_submit_crypto_market_order_uses_slash_symbol_and_gtc_time_in_force(monkeypatch):
+    credentials = alpaca_module.AlpacaCredentials(
+        endpoint="https://paper-api.alpaca.markets/v2",
+        key="paper-key",
+        secret="paper-secret",
+    )
+    client = AlpacaPaperClient(credentials)
+    captured = []
+
+    def fake_request(path, *, method="GET", payload=None):
+        captured.append((path, method, payload))
+        return {
+            "id": "crypto-order-123",
+            "symbol": "BTC/USD",
+            "side": "buy",
+            "status": "filled",
+            "filled_qty": "0.02",
+            "filled_avg_price": "50000.00",
+        }
+
+    monkeypatch.setattr(client, "_request_json", fake_request)
+
+    fill = client.submit_crypto_buy("BTC/USD", notional=1000.0)
+
+    assert captured == [
+        (
+            "/orders",
+            "POST",
+            {
+                "symbol": "BTC/USD",
+                "side": "buy",
+                "type": "market",
+                "time_in_force": "gtc",
+                "notional": "1000.00",
+            },
+        )
+    ]
+    assert fill.order_id == "crypto-order-123"
+    assert fill.symbol == "BTC/USD"
+    assert fill.quantity == 0.02
+    assert fill.price == 50_000.0
+    assert fill.notional == 1_000.0

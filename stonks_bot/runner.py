@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Protocol
 
 from .config import BotConfig
 from .ledger import PaperLedger
-from .models import Position, WatchItem
+from .market_hours import equity_market_hours_state
+from .models import Position, WatchItem, default_crypto_broker_symbol, infer_asset_class
 from .screener import build_static_candidate_universe, merge_candidate_universes
 from .strategy import Signal, generate_signal
 
@@ -37,9 +39,39 @@ class BrokerFillLike(Protocol):
 
 
 class BrokerExecutor(Protocol):
-    def market_is_open(self) -> tuple[bool, str]: ...
+    def market_is_open(self, *, extended_hours: bool = False) -> tuple[bool, str]: ...
     def submit_buy(self, symbol: str, notional: float) -> BrokerFillLike: ...
     def submit_sell(self, symbol: str, quantity: float) -> BrokerFillLike: ...
+    def submit_extended_hours_buy(self, symbol: str, notional: float, limit_price: float, time_in_force: str) -> BrokerFillLike: ...
+    def submit_extended_hours_sell(self, symbol: str, quantity: float, limit_price: float, time_in_force: str) -> BrokerFillLike: ...
+    def submit_crypto_buy(self, symbol: str, notional: float) -> BrokerFillLike: ...
+    def submit_crypto_sell(self, symbol: str, quantity: float) -> BrokerFillLike: ...
+
+
+def _item_is_equity(item: WatchItem) -> bool:
+    return item.asset_class != "crypto" and infer_asset_class(item.exchange, item.asset_class) == "equity"
+
+
+def _filter_equity_candidates_when_closed(items: list[WatchItem], *, equity_session_open: bool) -> tuple[list[WatchItem], int]:
+    if equity_session_open:
+        return items, 0
+    active: list[WatchItem] = []
+    paused = 0
+    for item in items:
+        if _item_is_equity(item):
+            paused += 1
+        else:
+            active.append(item)
+    return active, paused
+
+
+def _equity_pause_note(paused_count: int, reason: str) -> str | None:
+    if paused_count <= 0:
+        return None
+    noun = "candidate" if paused_count == 1 else "candidates"
+    if not reason.lower().startswith("equity session closed"):
+        reason = f"Equity session closed: {reason}"
+    return f"{reason}; paused {paused_count} equity {noun}; crypto remains active"
 
 
 @dataclass(slots=True)
@@ -65,18 +97,48 @@ def _boundary_line(config: BotConfig) -> str:
     return "Boundary: LOCAL PAPER ONLY — no broker orders, no live execution"
 
 
-def _broker_metadata(fill: BrokerFillLike, score: float, portfolio_score: float) -> dict:
-    return {
+def _broker_symbol(item: WatchItem) -> str | None:
+    if item.asset_class != "crypto":
+        return item.symbol
+    return item.broker_symbol or default_crypto_broker_symbol(item.symbol)
+
+def _active_equity_hours(config: BotConfig, now: datetime | None) -> tuple[bool, str]:
+    if not config.execution.market_hours_only:
+        return True, "US equity market-hours throttle disabled"
+    state = equity_market_hours_state(
+        now=now,
+        timezone_name=config.execution.market_timezone,
+        open_time=config.execution.market_open,
+        close_time=config.execution.market_close,
+    )
+    return state.is_open, state.reason
+
+
+def _metadata_for_item(item: WatchItem) -> dict:
+    metadata = {"asset_class": item.asset_class}
+    broker_symbol = _broker_symbol(item)
+    if broker_symbol and broker_symbol != item.symbol:
+        metadata["broker_symbol"] = broker_symbol
+    return metadata
+
+
+def _broker_metadata(fill: BrokerFillLike, score: float, portfolio_score: float, item: WatchItem | None = None) -> dict:
+    metadata = {
         "score": score,
         "portfolio_score": portfolio_score,
         "broker_order_id": fill.order_id,
         "broker_status": fill.status,
         "broker_side": fill.side,
     }
+    if item is not None:
+        metadata.update(_metadata_for_item(item))
+    return metadata
 
 
 def _local_metadata(evaluation: CandidateEvaluation) -> dict:
-    return {"score": evaluation.signal.score, "portfolio_score": evaluation.portfolio_score}
+    metadata = {"score": evaluation.signal.score, "portfolio_score": evaluation.portfolio_score}
+    metadata.update(_metadata_for_item(evaluation.item))
+    return metadata
 
 
 def _rsi_extension_risk(signal: Signal) -> float:
@@ -134,8 +196,23 @@ def _buy_notional(config: BotConfig, ledger: PaperLedger) -> float:
     return min(base_notional, spendable_cash, ledger.cash)
 
 
-async def _candidate_universe(config: BotConfig, ledger: PaperLedger, provider: AnalysisProvider) -> tuple[list[WatchItem], list[str]]:
-    open_items = [WatchItem(position.symbol, position.exchange) for position in ledger.list_positions()]
+async def _candidate_universe(
+    config: BotConfig,
+    ledger: PaperLedger,
+    provider: AnalysisProvider,
+    *,
+    now: datetime | None = None,
+) -> tuple[list[WatchItem], list[str]]:
+    equity_session_open, equity_reason = _active_equity_hours(config, now)
+    open_items = [
+        WatchItem(
+            position.symbol,
+            position.exchange,
+            str(position.metadata.get("asset_class") or "auto"),
+            str(position.metadata.get("broker_symbol") or "") or None,
+        )
+        for position in ledger.list_positions()
+    ]
     open_symbols = {item.symbol for item in open_items}
     static_items = build_static_candidate_universe(config, cap=False)
     discovery_notes: list[str] = []
@@ -144,15 +221,41 @@ async def _candidate_universe(config: BotConfig, ledger: PaperLedger, provider: 
     if config.screener.enabled and config.screener.source in {"mcp", "hybrid"}:
         discover = getattr(provider, "discover_candidates", None)
         if callable(discover):
-            dynamic_items = await discover(
-                config.screener.exchanges,
-                config.provider.timeframe,
-                config.screener.dynamic_sources,
-                config.screener.per_source_limit,
-            )
-            discovery_notes = list(getattr(provider, "last_discovery_notes", []))
+            discovery_exchanges = list(config.screener.exchanges)
+            skipped_equity_exchanges = 0
+            if not equity_session_open:
+                active_exchanges = []
+                for exchange in discovery_exchanges:
+                    if infer_asset_class(exchange) == "crypto":
+                        active_exchanges.append(exchange)
+                    else:
+                        skipped_equity_exchanges += 1
+                discovery_exchanges = active_exchanges
+                if skipped_equity_exchanges:
+                    discovery_notes.append(f"{equity_reason}; paused equity MCP discovery")
+            if discovery_exchanges and config.screener.dynamic_sources:
+                dynamic_items = await discover(
+                    discovery_exchanges,
+                    config.provider.timeframe,
+                    config.screener.dynamic_sources,
+                    config.screener.per_source_limit,
+                )
+                discovery_notes.extend(list(getattr(provider, "last_discovery_notes", [])))
         else:
             discovery_notes = ["mcp-discovery=unavailable-on-provider"]
+
+    if not equity_session_open:
+        paused_symbols = {
+            item.symbol
+            for item in [*open_items, *dynamic_items, *static_items]
+            if _item_is_equity(item)
+        }
+        open_items, _ = _filter_equity_candidates_when_closed(open_items, equity_session_open=equity_session_open)
+        dynamic_items, _ = _filter_equity_candidates_when_closed(dynamic_items, equity_session_open=equity_session_open)
+        static_items, _ = _filter_equity_candidates_when_closed(static_items, equity_session_open=equity_session_open)
+        note = _equity_pause_note(len(paused_symbols), equity_reason)
+        if note is not None:
+            discovery_notes.append(note)
 
     if config.screener.enabled and config.screener.source in {"mcp", "hybrid"}:
         # Dynamic MCP results are the primary broad-market source. The watchlist
@@ -164,9 +267,15 @@ async def _candidate_universe(config: BotConfig, ledger: PaperLedger, provider: 
     return merged, discovery_notes
 
 
-async def _evaluate_candidates(config: BotConfig, ledger: PaperLedger, provider: AnalysisProvider) -> tuple[list[CandidateEvaluation], list[str]]:
+async def _evaluate_candidates(
+    config: BotConfig,
+    ledger: PaperLedger,
+    provider: AnalysisProvider,
+    *,
+    now: datetime | None = None,
+) -> tuple[list[CandidateEvaluation], list[str]]:
     evaluations: list[CandidateEvaluation] = []
-    candidates, discovery_notes = await _candidate_universe(config, ledger, provider)
+    candidates, discovery_notes = await _candidate_universe(config, ledger, provider, now=now)
     for item in candidates:
         analysis = await provider.combined_analysis(item.symbol, item.exchange, config.provider.timeframe)
         position = ledger.get_position(item.symbol)
@@ -217,20 +326,58 @@ def _execute_sell(
 ) -> str:
     signal = evaluation.signal
     if config.broker.submit_orders:
-        is_open, market_reason = broker_market_state()
-        if not is_open:
-            ledger.mark_price(evaluation.item.symbol, signal.price)
-            return f"BROKER HOLD {evaluation.item.symbol}: {market_reason}; no Alpaca paper sell submitted"
         assert broker is not None
         current_position = ledger.get_position(evaluation.item.symbol)
         if current_position is None:
             return f"HOLD {evaluation.item.symbol}: sell signal but no local paper position"
+
+        if evaluation.item.asset_class == "crypto":
+            broker_symbol = _broker_symbol(evaluation.item)
+            if not broker_symbol:
+                ledger.mark_price(evaluation.item.symbol, signal.price)
+                return f"BROKER HOLD {evaluation.item.symbol}: no Alpaca crypto broker_symbol configured; no paper sell submitted"
+            fill = broker.submit_crypto_sell(broker_symbol, current_position.quantity)
+            trade = ledger.sell(
+                evaluation.item.symbol,
+                price=fill.price,
+                reason="; ".join(signal.reasons[:4]),
+                metadata=_broker_metadata(fill, signal.score, evaluation.portfolio_score, evaluation.item),
+            )
+            return (
+                f"ALPACA PAPER CRYPTO SELL {trade.symbol}: broker_symbol={broker_symbol}, order_id={fill.order_id}, "
+                f"qty={trade.quantity:.4f} @ {trade.price:.2f}, pnl={trade.pnl_realized:.2f}, "
+                f"score={signal.score:.1f}, adj={evaluation.portfolio_score:.1f}"
+            )
+
+        is_open, market_reason = broker_market_state(config.broker.equity_extended_hours)
+        if not is_open:
+            ledger.mark_price(evaluation.item.symbol, signal.price)
+            return f"BROKER HOLD {evaluation.item.symbol}: {market_reason}; no Alpaca paper sell submitted"
+        if config.broker.equity_extended_hours:
+            limit_price = _execution_price(signal.price, "SELL", config.slippage_pct)
+            fill = broker.submit_extended_hours_sell(
+                evaluation.item.symbol,
+                current_position.quantity,
+                limit_price,
+                config.broker.equity_extended_hours_time_in_force,
+            )
+            trade = ledger.sell(
+                evaluation.item.symbol,
+                price=fill.price,
+                reason="; ".join(signal.reasons[:4]),
+                metadata=_broker_metadata(fill, signal.score, evaluation.portfolio_score, evaluation.item),
+            )
+            return (
+                f"ALPACA PAPER 24/5 SELL {trade.symbol}: order_id={fill.order_id}, limit={limit_price:.2f}, "
+                f"qty={trade.quantity:.4f} @ {trade.price:.2f}, pnl={trade.pnl_realized:.2f}, "
+                f"score={signal.score:.1f}, adj={evaluation.portfolio_score:.1f}"
+            )
         fill = broker.submit_sell(evaluation.item.symbol, current_position.quantity)
         trade = ledger.sell(
             evaluation.item.symbol,
             price=fill.price,
             reason="; ".join(signal.reasons[:4]),
-            metadata=_broker_metadata(fill, signal.score, evaluation.portfolio_score),
+            metadata=_broker_metadata(fill, signal.score, evaluation.portfolio_score, evaluation.item),
         )
         return (
             f"ALPACA PAPER SELL {trade.symbol}: order_id={fill.order_id}, qty={trade.quantity:.4f} @ {trade.price:.2f}, "
@@ -252,10 +399,50 @@ def _execute_buy(
 ) -> tuple[bool, str]:
     signal = evaluation.signal
     if config.broker.submit_orders:
-        is_open, market_reason = broker_market_state()
+        assert broker is not None
+        if evaluation.item.asset_class == "crypto":
+            broker_symbol = _broker_symbol(evaluation.item)
+            if not broker_symbol:
+                return False, f"BROKER HOLD {evaluation.item.symbol}: no Alpaca crypto broker_symbol configured; no paper order submitted"
+            fill = broker.submit_crypto_buy(broker_symbol, notional)
+            trade = ledger.buy(
+                evaluation.item.symbol,
+                evaluation.item.exchange,
+                price=fill.price,
+                notional=fill.notional,
+                reason="; ".join(signal.reasons[:4]),
+                metadata=_broker_metadata(fill, signal.score, evaluation.portfolio_score, evaluation.item),
+            )
+            return True, (
+                f"ALPACA PAPER CRYPTO BUY {trade.symbol}: broker_symbol={broker_symbol}, order_id={fill.order_id}, "
+                f"qty={trade.quantity:.4f} @ {trade.price:.2f}, notional={trade.notional:.2f}, "
+                f"score={signal.score:.1f}, adj={evaluation.portfolio_score:.1f}"
+            )
+
+        is_open, market_reason = broker_market_state(config.broker.equity_extended_hours)
         if not is_open:
             return False, f"BROKER HOLD {evaluation.item.symbol}: {market_reason}; no Alpaca paper order submitted"
-        assert broker is not None
+        if config.broker.equity_extended_hours:
+            limit_price = _execution_price(signal.price, "BUY", config.slippage_pct)
+            fill = broker.submit_extended_hours_buy(
+                evaluation.item.symbol,
+                notional,
+                limit_price,
+                config.broker.equity_extended_hours_time_in_force,
+            )
+            trade = ledger.buy(
+                evaluation.item.symbol,
+                evaluation.item.exchange,
+                price=fill.price,
+                notional=fill.notional,
+                reason="; ".join(signal.reasons[:4]),
+                metadata=_broker_metadata(fill, signal.score, evaluation.portfolio_score, evaluation.item),
+            )
+            return True, (
+                f"ALPACA PAPER 24/5 BUY {trade.symbol}: order_id={fill.order_id}, limit={limit_price:.2f}, "
+                f"qty={trade.quantity:.4f} @ {trade.price:.2f}, notional={trade.notional:.2f}, "
+                f"score={signal.score:.1f}, adj={evaluation.portfolio_score:.1f}"
+            )
         fill = broker.submit_buy(evaluation.item.symbol, notional)
         trade = ledger.buy(
             evaluation.item.symbol,
@@ -263,7 +450,7 @@ def _execute_buy(
             price=fill.price,
             notional=fill.notional,
             reason="; ".join(signal.reasons[:4]),
-            metadata=_broker_metadata(fill, signal.score, evaluation.portfolio_score),
+            metadata=_broker_metadata(fill, signal.score, evaluation.portfolio_score, evaluation.item),
         )
         return True, (
             f"ALPACA PAPER BUY {trade.symbol}: order_id={fill.order_id}, qty={trade.quantity:.4f} @ {trade.price:.2f}, "
@@ -282,11 +469,11 @@ def _execute_buy(
     return True, f"PAPER BUY {trade.symbol}: qty={trade.quantity:.4f} @ {trade.price:.2f}, notional={trade.notional:.2f}, score={signal.score:.1f}, adj={evaluation.portfolio_score:.1f}"
 
 
-async def screen_once(config: BotConfig, ledger: PaperLedger, provider: AnalysisProvider) -> str:
+async def screen_once(config: BotConfig, ledger: PaperLedger, provider: AnalysisProvider, *, now: datetime | None = None) -> str:
     if not config.execution.dry_run or config.execution.live_trading_enabled:
         raise ValueError("refusing to run: paper trading only")
 
-    evaluations, discovery_notes = await _evaluate_candidates(config, ledger, provider)
+    evaluations, discovery_notes = await _evaluate_candidates(config, ledger, provider, now=now)
     rows = _ordered_screen_rows(config, evaluations)
     lines = [
         "stonks-paper-bot screener",
@@ -308,23 +495,29 @@ async def screen_once(config: BotConfig, ledger: PaperLedger, provider: Analysis
     return "\n".join(lines)
 
 
-async def run_once(config: BotConfig, ledger: PaperLedger, provider: AnalysisProvider, broker: BrokerExecutor | None = None) -> str:
+async def run_once(
+    config: BotConfig,
+    ledger: PaperLedger,
+    provider: AnalysisProvider,
+    broker: BrokerExecutor | None = None,
+    *,
+    now: datetime | None = None,
+) -> str:
     if not config.execution.dry_run or config.execution.live_trading_enabled:
         raise ValueError("refusing to run: paper trading only")
     if config.broker.submit_orders and broker is None:
         raise ValueError("broker order submission is enabled but no broker executor was provided")
 
     lines = ["stonks-paper-bot scan", _boundary_line(config)]
-    market_state: tuple[bool, str] | None = None
+    market_states: dict[bool, tuple[bool, str]] = {}
 
-    def broker_market_state() -> tuple[bool, str]:
-        nonlocal market_state
-        if market_state is None:
+    def broker_market_state(extended_hours: bool = False) -> tuple[bool, str]:
+        if extended_hours not in market_states:
             assert broker is not None
-            market_state = broker.market_is_open()
-        return market_state
+            market_states[extended_hours] = broker.market_is_open(extended_hours=extended_hours)
+        return market_states[extended_hours]
 
-    evaluations, discovery_notes = await _evaluate_candidates(config, ledger, provider)
+    evaluations, discovery_notes = await _evaluate_candidates(config, ledger, provider, now=now)
     if discovery_notes:
         lines.append("Discovery: " + "; ".join(discovery_notes[:12]))
 

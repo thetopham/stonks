@@ -1,0 +1,29 @@
+# Read-only TradingView MCP backtest research matrix.
+# This never touches Alpaca, never writes paper-ledger trades, and only appends JSONL research rows.
+
+name = "default-tradingview-backtest-farm"
+description = "Compare TradingView MCP strategy families across symbols, periods, intervals, commission, and slippage."
+
+# Yahoo Finance symbols, not TradingView exchange symbols.
+symbols = ["SPY", "QQQ", "AAPL", "MSFT", "NVDA", "TSLA", "BTC-USD", "ETH-USD"]
+
+# Use "all" for the six TradingView MCP backtest strategies:
+# rsi, bollinger, macd, ema_cross, supertrend, donchian.
+strategies = ["all"]
+
+# Keep the default matrix useful but bounded. Add 1h only when you intentionally want heavier research.
+periods = ["1y", "2y"]
+intervals = ["1d"]
+
+initial_capital_values = [10000]
+commission_pct_values = [0.05, 0.10]
+slippage_pct_values = [0.02, 0.05]
+
+include_trade_log = false
+include_equity_curve = false
+
+# Hard cap so accidental huge matrices do not hammer MCP/Yahoo.
+# Set to 0 for no cap once you have reviewed --dry-plan.
+max_runs = 96
+
+output_path = "data/research/backtest-farm-results.jsonl"

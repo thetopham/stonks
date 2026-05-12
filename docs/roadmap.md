@@ -71,14 +71,21 @@ TODO:
 
 Goal: learn which strategy family works for each symbol before allocating paper capital.
 
+Status: first read-only research farm implemented. `stonks-paper backtest-farm` runs bounded TradingView MCP `backtest_strategy` matrices from `configs/research/backtest-farm.toml`, appends JSONL summaries under `data/research/`, and prints a local leaderboard. It is research-only: no broker orders and no paper-ledger trades.
+
+Implemented:
+
+- Research command that runs historical backtests outside the live scan loop.
+- Strategy-family matrix for RSI, Bollinger, MACD, EMA cross, Supertrend, and Donchian.
+- Commission/slippage/period/interval/initial-capital split tests with `max_runs` guardrail.
+- Local JSONL storage for later dashboard/notebook analysis.
+
 TODO:
 
-- Add a research command that runs historical backtests outside the live scan loop.
-- Compare strategy families per symbol: RSI, Bollinger, MACD, EMA cross, Supertrend, and Donchian.
-- Rank strategies with realistic commission and slippage, not only total return.
-- Prefer robust metrics: Sharpe, Calmar, max drawdown, profit factor, expectancy, win rate, and vs buy-and-hold.
-- Store backtest summaries locally and expose them in status/dashboard as research context, not as automatic live-trading permission.
-- Add walk-forward validation before trusting a strategy for optimizer weights.
+- Add `compare_strategies` quick sweeps for faster all-six comparisons per symbol/window.
+- Add `walk_forward_backtest_strategy` validation before trusting a strategy for optimizer weights.
+- Surface latest research winners in dashboard/status as context, not automatic trading permission.
+- Add market-regime and confluence snapshots beside backtest rows.
 
 Candidate tools to evaluate:
 

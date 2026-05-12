@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from stonks_bot.config import load_config
+from stonks_bot.screener import build_static_candidate_universe
 
 
 def test_load_config_keeps_live_trading_disabled_by_default(tmp_path):
@@ -42,6 +43,7 @@ exchange = "NASDAQ"
     assert config.execution.live_trading_enabled is False
     assert config.ledger_path == Path("ledger.sqlite3")
     assert config.watchlist[0].symbol == "AAPL"
+    assert config.provider.timeframe == "1d"
 
 
 def test_live_trading_enabled_is_rejected(tmp_path):
@@ -258,6 +260,8 @@ exchange = "NASDAQ"
 
     config = load_config(cfg_path)
 
+    assert config.execution.scan_interval_seconds == 1800
+    assert config.execution.initial_delay_seconds == 0
     assert config.selection.mode == "ranked"
     assert config.selection.preview_top == 7
     assert config.screener.enabled is True
@@ -272,3 +276,198 @@ exchange = "NASDAQ"
     assert config.optimizer.cash_reserve_pct == 0.20
     assert config.optimizer.max_new_buys_per_scan == 2
     assert config.optimizer.min_position_notional == 100
+    assert config.provider.timeframe == "4h"
+    assert config.provider.cache_enabled is True
+    assert config.provider.cache_path == Path("data/provider-cache.sqlite3")
+    assert config.provider.cache_ttl_seconds == 300
+    assert config.provider.cache_stale_seconds == 21600
+    assert config.provider.rate_limit_cooldown_seconds == 900
+    assert config.provider.min_upstream_interval_seconds == 5
+
+
+def test_load_config_reads_provider_cache_knobs(tmp_path):
+    cfg_path = tmp_path / "provider-cache.toml"
+    cfg_path.write_text(
+        """
+ledger_path = "ledger.sqlite3"
+
+[execution]
+dry_run = true
+live_trading_enabled = false
+
+[provider]
+command = "/bin/echo"
+args = ["fake"]
+timeframe = "4h"
+
+[provider.cache]
+enabled = true
+path = "data/test-provider-cache.sqlite3"
+ttl_seconds = 120
+stale_seconds = 3600
+rate_limit_cooldown_seconds = 600
+min_upstream_interval_seconds = 3
+allow_stale_on_error = true
+
+[[watchlist]]
+symbol = "AAPL"
+exchange = "NASDAQ"
+"""
+    )
+
+    config = load_config(cfg_path)
+
+    assert config.provider.cache_enabled is True
+    assert config.provider.cache_path == Path("data/test-provider-cache.sqlite3")
+    assert config.provider.cache_ttl_seconds == 120
+    assert config.provider.cache_stale_seconds == 3600
+    assert config.provider.rate_limit_cooldown_seconds == 600
+    assert config.provider.min_upstream_interval_seconds == 3
+    assert config.provider.allow_stale_on_error is True
+
+
+def test_load_config_preserves_explicit_empty_dynamic_sources(tmp_path):
+    cfg_path = tmp_path / "curated-no-dynamic.toml"
+    cfg_path.write_text(
+        """
+ledger_path = "ledger.sqlite3"
+
+[execution]
+dry_run = true
+live_trading_enabled = false
+
+[screener]
+enabled = true
+source = "curated"
+universes = ["watchlist", "etf_core"]
+dynamic_sources = []
+max_candidates = 50
+
+[[watchlist]]
+symbol = "AAPL"
+exchange = "NASDAQ"
+"""
+    )
+
+    config = load_config(cfg_path)
+
+    assert config.screener.source == "curated"
+    assert config.screener.universes == ["watchlist", "etf_core"]
+    assert config.screener.dynamic_sources == []
+    assert config.screener.max_candidates == 50
+
+
+def test_live_paper_config_uses_curated_top_50_universe_without_full_exchange_scans():
+    config = load_config(Path(__file__).resolve().parent.parent / "config.paper.toml")
+
+    assert config.screener.source == "curated"
+    assert config.screener.universes == ["indices", "watchlist"]
+    assert config.screener.dynamic_sources == []
+    assert config.screener.max_candidates == 50
+    assert len(config.watchlist) == 50
+    candidates = build_static_candidate_universe(config)
+    assert len(candidates) == 50
+    assert [item.symbol for item in candidates[:5]] == ["SPY", "QQQ", "IWM", "DIA", "VTI"]
+
+
+def test_load_config_reads_alpaca_equity_extended_hours_knobs(tmp_path):
+    cfg_path = tmp_path / "extended-hours.toml"
+    cfg_path.write_text(
+        """
+ledger_path = "ledger.sqlite3"
+
+[execution]
+dry_run = true
+live_trading_enabled = false
+
+[broker]
+name = "alpaca"
+paper_only = true
+submit_orders = true
+equity_extended_hours = true
+equity_extended_hours_time_in_force = "gtc"
+
+[[watchlist]]
+symbol = "AAPL"
+exchange = "NASDAQ"
+"""
+    )
+
+    config = load_config(cfg_path)
+
+    assert config.broker.equity_extended_hours is True
+    assert config.broker.equity_extended_hours_time_in_force == "gtc"
+
+
+def test_load_config_rejects_invalid_equity_extended_hours_time_in_force(tmp_path):
+    cfg_path = tmp_path / "bad-extended-hours.toml"
+    cfg_path.write_text(
+        """
+ledger_path = "ledger.sqlite3"
+
+[execution]
+dry_run = true
+live_trading_enabled = false
+
+[broker]
+name = "alpaca"
+paper_only = true
+submit_orders = true
+equity_extended_hours = true
+equity_extended_hours_time_in_force = "ioc"
+
+[[watchlist]]
+symbol = "AAPL"
+exchange = "NASDAQ"
+"""
+    )
+
+    try:
+        load_config(cfg_path)
+    except ValueError as exc:
+        assert "equity_extended_hours_time_in_force" in str(exc)
+    else:
+        raise AssertionError("expected invalid extended-hours TIF to be rejected")
+
+
+def test_load_config_reads_crypto_watchlist_metadata_and_infers_crypto_exchanges(tmp_path):
+    cfg_path = tmp_path / "crypto.toml"
+    cfg_path.write_text(
+        """
+ledger_path = "ledger.sqlite3"
+
+[execution]
+dry_run = true
+live_trading_enabled = false
+
+[screener]
+enabled = true
+source = "mcp"
+exchanges = ["NASDAQ", "BINANCE", "KUCOIN"]
+
+[[watchlist]]
+symbol = "AAPL"
+exchange = "NASDAQ"
+
+[[watchlist]]
+symbol = "BTCUSDT"
+exchange = "BINANCE"
+asset_class = "crypto"
+broker_symbol = "BTC/USD"
+
+[[watchlist]]
+symbol = "ETHUSDT"
+exchange = "KUCOIN"
+broker_symbol = "ETH/USD"
+"""
+    )
+
+    config = load_config(cfg_path)
+
+    assert config.screener.exchanges == ["NASDAQ", "BINANCE", "KUCOIN"]
+    assert config.watchlist[0].asset_class == "equity"
+    assert config.watchlist[1].symbol == "BTCUSDT"
+    assert config.watchlist[1].asset_class == "crypto"
+    assert config.watchlist[1].broker_symbol == "BTC/USD"
+    assert config.watchlist[2].asset_class == "crypto"
+    assert config.watchlist[2].broker_symbol == "ETH/USD"
