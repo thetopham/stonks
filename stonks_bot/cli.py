@@ -47,10 +47,26 @@ def _build_broker_if_enabled(config_path: Path):
     return config, AlpacaPaperClient(credentials)
 
 
+def _tradingview_provider(config):
+    provider = config.provider
+    return TradingViewMCPProvider(
+        provider.command,
+        provider.args,
+        provider.timeframe,
+        cache_enabled=provider.cache_enabled,
+        cache_path=provider.cache_path,
+        cache_ttl_seconds=provider.cache_ttl_seconds,
+        cache_stale_seconds=provider.cache_stale_seconds,
+        rate_limit_cooldown_seconds=provider.rate_limit_cooldown_seconds,
+        min_upstream_interval_seconds=provider.min_upstream_interval_seconds,
+        allow_stale_on_error=provider.allow_stale_on_error,
+    )
+
+
 async def _run_once(config_path: Path) -> str:
     config, broker = _build_broker_if_enabled(config_path)
     ledger = PaperLedger(config.ledger_path, starting_cash=config.starting_cash)
-    async with TradingViewMCPProvider(config.provider.command, config.provider.args, config.provider.timeframe) as provider:
+    async with _tradingview_provider(config) as provider:
         return await run_once(config, ledger, provider, broker=broker)
 
 
@@ -58,7 +74,7 @@ async def _screen_once(config_path: Path) -> str:
     config = load_config(config_path)
     ledger = PaperLedger(config.ledger_path, starting_cash=config.starting_cash)
     try:
-        async with TradingViewMCPProvider(config.provider.command, config.provider.args, config.provider.timeframe) as provider:
+        async with _tradingview_provider(config) as provider:
             return await screen_once(config, ledger, provider)
     finally:
         ledger.close()
@@ -76,7 +92,7 @@ async def _options_scan(config_path: Path, env_paths=None) -> str:
     ledger = PaperLedger(config.ledger_path, starting_cash=config.starting_cash)
     options_ledger = OptionsPaperLedger(config.ledger_path, starting_cash=config.starting_cash)
     try:
-        async with TradingViewMCPProvider(config.provider.command, config.provider.args, config.provider.timeframe) as provider:
+        async with _tradingview_provider(config) as provider:
             return await options_scan_once(config, ledger, options_ledger, provider, client)
     finally:
         ledger.close()
@@ -91,7 +107,7 @@ async def _options_paper(config_path: Path, env_paths=None) -> str:
     try:
         if config.options.submit_orders:
             sync_options_cash_from_account(options_ledger, client.get_account())
-        async with TradingViewMCPProvider(config.provider.command, config.provider.args, config.provider.timeframe) as provider:
+        async with _tradingview_provider(config) as provider:
             return await options_paper_once(config, ledger, options_ledger, provider, client, broker=broker)
     finally:
         ledger.close()
@@ -125,7 +141,7 @@ async def _farm_run_variant(variant: FarmVariant) -> str:
     assert_shadow_safe(config, variant_name=variant.name)
     ledger = PaperLedger(config.ledger_path, starting_cash=config.starting_cash)
     try:
-        async with TradingViewMCPProvider(config.provider.command, config.provider.args, config.provider.timeframe) as provider:
+        async with _tradingview_provider(config) as provider:
             result = await run_once(config, ledger, provider, broker=None)
     finally:
         ledger.close()
@@ -148,7 +164,7 @@ async def _farm_run_once(farm_dir: Path) -> str:
 async def _backtest_farm(bot_config_path: Path, research_config_path: Path) -> dict:
     bot_config = load_config(bot_config_path)
     research_config = load_backtest_farm_config(research_config_path)
-    async with TradingViewMCPProvider(bot_config.provider.command, bot_config.provider.args, bot_config.provider.timeframe) as provider:
+    async with _tradingview_provider(bot_config) as provider:
         return await run_backtest_farm(research_config, provider)
 
 

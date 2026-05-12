@@ -25,15 +25,15 @@ mode = "ranked"
 preview_top = 15
 
 [screener]
-# Use MCP screeners across equities and major crypto exchanges first; the watchlist is only a guaranteed seed.
-# max_candidates caps the slower deep combined_analysis pass after dynamic discovery.
+# Use the capped top-50 curated universe: core index ETFs plus configured watchlist.
+# This avoids broad TradingView exchange scans across full NASDAQ/NYSE/S&P-style universes.
 enabled = true
-source = "mcp"
-universes = ["watchlist"]
+source = "curated"
+universes = ["indices", "watchlist"]
 exchanges = ["NASDAQ", "NYSE", "BINANCE", "KUCOIN"]
-dynamic_sources = ["rating_strong_buy", "rating_buy", "volume_breakout", "smart_volume", "top_gainers"]
-per_source_limit = 50
-max_candidates = 100
+dynamic_sources = []
+per_source_limit = 10
+max_candidates = 50
 exclude_symbols = []
 
 [optimizer]
@@ -74,6 +74,15 @@ command = "/home/matt/workspace/stonks-paper-bot/scripts/tradingview-mcp-fixed"
 args = []
 timeframe = "4h"
 
+[provider.cache]
+enabled = true
+path = "data/provider-cache.sqlite3"
+ttl_seconds = 300
+stale_seconds = 21600
+rate_limit_cooldown_seconds = 900
+min_upstream_interval_seconds = 5
+allow_stale_on_error = true
+
 [broker]
 name = "alpaca"
 endpoint_env = "alpaca_endpoint"
@@ -86,16 +95,36 @@ submit_orders = true
 equity_extended_hours = true
 equity_extended_hours_time_in_force = "day"
 
-# Existing baseline trackers.
+# Active top-50 universe. With screener.max_candidates = 50, these are the only new-entry symbols scored.
+
 [[watchlist]]
 symbol = "AAPL"
 exchange = "NASDAQ"
 
 [[watchlist]]
+symbol = "MSFT"
+exchange = "NASDAQ"
+
+[[watchlist]]
+symbol = "GOOGL"
+exchange = "NASDAQ"
+
+[[watchlist]]
+symbol = "AMZN"
+exchange = "NASDAQ"
+
+[[watchlist]]
+symbol = "META"
+exchange = "NASDAQ"
+
+[[watchlist]]
+symbol = "ORCL"
+exchange = "NYSE"
+
+[[watchlist]]
 symbol = "SPY"
 exchange = "NYSE"
 
-# Major crypto spot pairs. TradingView MCP screens the USDT symbols; Alpaca paper orders use slash USD broker symbols.
 [[watchlist]]
 symbol = "BTCUSDT"
 exchange = "BINANCE"
@@ -115,12 +144,6 @@ asset_class = "crypto"
 broker_symbol = "SOL/USD"
 
 [[watchlist]]
-symbol = "DOGEUSDT"
-exchange = "BINANCE"
-asset_class = "crypto"
-broker_symbol = "DOGE/USD"
-
-[[watchlist]]
 symbol = "AVAXUSDT"
 exchange = "BINANCE"
 asset_class = "crypto"
@@ -132,19 +155,6 @@ exchange = "BINANCE"
 asset_class = "crypto"
 broker_symbol = "LINK/USD"
 
-[[watchlist]]
-symbol = "LTCUSDT"
-exchange = "BINANCE"
-asset_class = "crypto"
-broker_symbol = "LTC/USD"
-
-[[watchlist]]
-symbol = "BCHUSDT"
-exchange = "BINANCE"
-asset_class = "crypto"
-broker_symbol = "BCH/USD"
-
-# AI Supercycle Phase 1 — semis, memory/storage, photonics/optics.
 [[watchlist]]
 symbol = "NVDA"
 exchange = "NASDAQ"
@@ -174,14 +184,6 @@ symbol = "WDC"
 exchange = "NASDAQ"
 
 [[watchlist]]
-symbol = "SNDK"
-exchange = "NASDAQ"
-
-[[watchlist]]
-symbol = "NOK"
-exchange = "NYSE"
-
-[[watchlist]]
 symbol = "LITE"
 exchange = "NASDAQ"
 
@@ -189,7 +191,18 @@ exchange = "NASDAQ"
 symbol = "COHR"
 exchange = "NYSE"
 
-# AI Supercycle Phase 2 — compute, AI data centers, power/grid/cooling, networks.
+[[watchlist]]
+symbol = "MRVL"
+exchange = "NASDAQ"
+
+[[watchlist]]
+symbol = "CSCO"
+exchange = "NASDAQ"
+
+[[watchlist]]
+symbol = "ANET"
+exchange = "NYSE"
+
 [[watchlist]]
 symbol = "IREN"
 exchange = "NASDAQ"
@@ -239,30 +252,8 @@ symbol = "OKLO"
 exchange = "NYSE"
 
 [[watchlist]]
-symbol = "ANET"
-exchange = "NYSE"
-
-[[watchlist]]
-symbol = "MRVL"
-exchange = "NASDAQ"
-
-[[watchlist]]
-symbol = "CSCO"
-exchange = "NASDAQ"
-
-# AI Supercycle Phase 3 — rare earths, space/defense/drones, robotics/autonomy.
-[[watchlist]]
 symbol = "MP"
 exchange = "NYSE"
-
-[[watchlist]]
-symbol = "USAR"
-exchange = "NASDAQ"
-
-# Ucore Rare Metals from the image; OTC/Yahoo fallback may be price-only if TradingView analysis is unavailable.
-[[watchlist]]
-symbol = "UURAF"
-exchange = "OTC"
 
 [[watchlist]]
 symbol = "FCX"
@@ -293,45 +284,12 @@ symbol = "AVAV"
 exchange = "NASDAQ"
 
 [[watchlist]]
-symbol = "ONDS"
-exchange = "NASDAQ"
-
-[[watchlist]]
 symbol = "TSLA"
 exchange = "NASDAQ"
 
 [[watchlist]]
-symbol = "PATH"
-exchange = "NYSE"
-
-[[watchlist]]
 symbol = "SYM"
 exchange = "NASDAQ"
-
-[[watchlist]]
-symbol = "SERV"
-exchange = "NASDAQ"
-
-# AI Supercycle Phase 4 — AI software dominance and AGI infrastructure.
-[[watchlist]]
-symbol = "MSFT"
-exchange = "NASDAQ"
-
-[[watchlist]]
-symbol = "GOOGL"
-exchange = "NASDAQ"
-
-[[watchlist]]
-symbol = "AMZN"
-exchange = "NASDAQ"
-
-[[watchlist]]
-symbol = "META"
-exchange = "NASDAQ"
-
-[[watchlist]]
-symbol = "ORCL"
-exchange = "NYSE"
 
 [[watchlist]]
 symbol = "QBTS"
@@ -343,4 +301,8 @@ exchange = "NYSE"
 
 [[watchlist]]
 symbol = "RGTI"
+exchange = "NASDAQ"
+
+[[watchlist]]
+symbol = "SERV"
 exchange = "NASDAQ"

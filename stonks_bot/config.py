@@ -60,6 +60,13 @@ class ProviderConfig:
     command: str = "/home/matt/.local/bin/uvx"
     args: list[str] = field(default_factory=lambda: ["--from", "tradingview-mcp-server", "tradingview-mcp"])
     timeframe: str = "4h"
+    cache_enabled: bool = True
+    cache_path: Path = Path("data/provider-cache.sqlite3")
+    cache_ttl_seconds: int = 300
+    cache_stale_seconds: int = 21600
+    rate_limit_cooldown_seconds: int = 900
+    min_upstream_interval_seconds: int = 5
+    allow_stale_on_error: bool = True
 
 
 @dataclass(slots=True)
@@ -219,19 +226,17 @@ def load_config(path: str | Path) -> BotConfig:
     screener_source = str(screener_data.get("source", "curated")).strip().lower()
     if screener_source not in {"curated", "mcp", "hybrid"}:
         raise ValueError("screener.source must be one of 'curated', 'mcp', or 'hybrid'")
+    default_dynamic_sources = ["rating_strong_buy", "rating_buy", "volume_breakout", "smart_volume", "top_gainers"]
+    raw_dynamic_sources = screener_data.get("dynamic_sources", default_dynamic_sources)
+    dynamic_sources = _str_list(raw_dynamic_sources, lower=True)
+    if "dynamic_sources" not in screener_data and not dynamic_sources:
+        dynamic_sources = default_dynamic_sources
     screener = ScreenerConfig(
         enabled=bool(screener_data.get("enabled", False)),
         source=screener_source,
         universes=_str_list(screener_data.get("universes", ["watchlist"]), lower=True) or ["watchlist"],
         exchanges=_str_list(screener_data.get("exchanges", ["NASDAQ", "NYSE"]), upper=True) or ["NASDAQ", "NYSE"],
-        dynamic_sources=_str_list(
-            screener_data.get(
-                "dynamic_sources",
-                ["rating_strong_buy", "rating_buy", "volume_breakout", "smart_volume", "top_gainers"],
-            ),
-            lower=True,
-        )
-        or ["rating_strong_buy", "rating_buy", "volume_breakout", "smart_volume", "top_gainers"],
+        dynamic_sources=dynamic_sources,
         per_source_limit=max(1, int(screener_data.get("per_source_limit", 50))),
         max_candidates=max(1, int(screener_data.get("max_candidates", 100))),
         exclude_symbols=_str_list(screener_data.get("exclude_symbols", []), upper=True),
@@ -246,10 +251,18 @@ def load_config(path: str | Path) -> BotConfig:
     )
 
     provider_data = data.get("provider", {})
+    provider_cache_data = provider_data.get("cache", {}) if isinstance(provider_data.get("cache", {}), dict) else {}
     provider = ProviderConfig(
         command=str(provider_data.get("command", "/home/matt/.local/bin/uvx")),
         args=[str(arg) for arg in provider_data.get("args", ["--from", "tradingview-mcp-server", "tradingview-mcp"])],
         timeframe=_normalize_provider_timeframe(provider_data.get("timeframe", "4h")),
+        cache_enabled=bool(provider_cache_data.get("enabled", True)),
+        cache_path=Path(provider_cache_data.get("path", "data/provider-cache.sqlite3")),
+        cache_ttl_seconds=max(0, int(provider_cache_data.get("ttl_seconds", 300))),
+        cache_stale_seconds=max(0, int(provider_cache_data.get("stale_seconds", 21600))),
+        rate_limit_cooldown_seconds=max(1, int(provider_cache_data.get("rate_limit_cooldown_seconds", 900))),
+        min_upstream_interval_seconds=max(1, int(provider_cache_data.get("min_upstream_interval_seconds", 5))),
+        allow_stale_on_error=bool(provider_cache_data.get("allow_stale_on_error", True)),
     )
 
     broker_data = data.get("broker", {})

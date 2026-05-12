@@ -11,6 +11,13 @@ _CRYPTO_SYMBOL_RE = re.compile(r"^[A-Z0-9]{4,20}$")
 
 
 CURATED_UNIVERSES: dict[str, list[WatchItem]] = {
+    "indices": [
+        WatchItem("SPY", "NYSE"),
+        WatchItem("QQQ", "NASDAQ"),
+        WatchItem("IWM", "NYSE"),
+        WatchItem("DIA", "NYSE"),
+        WatchItem("VTI", "NYSE"),
+    ],
     "etf_core": [
         WatchItem("SPY", "NYSE"),
         WatchItem("QQQ", "NASDAQ"),

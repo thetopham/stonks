@@ -21,9 +21,9 @@ stop_loss_pct = 0.07
 take_profit_pct = 0.15
 
 [screener]
-per_source_limit = 10
-max_candidates = 12
-dynamic_sources = ["rating_strong_buy", "rating_buy", "volume_breakout", "top_gainers"]
+source = "curated"
+universes = ["indices", "watchlist"]
+max_candidates = 50
 
 [broker]
 submit_orders = false

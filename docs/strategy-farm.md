@@ -115,16 +115,16 @@ The dashboard uses the same local farm-status path when `configs/farm` exists. T
 | `strict-30m-4h` | `4h` | 30m | Higher entry threshold and lower RSI ceiling. |
 | `aggressive-15m-1h` | `1h` | 15m | Easier entries, looser RSI ceiling, tighter stop/take-profit. |
 
-The farm variants intentionally cap discovery load lower than the main bot:
+The farm variants currently hold the same capped top-50 curated universe as the main bot: core index ETFs first, then the configured watchlist.
 
 ```toml
 [screener]
-per_source_limit = 10
-max_candidates = 12
-dynamic_sources = ["rating_strong_buy", "rating_buy", "volume_breakout", "top_gainers"]
+source = "curated"
+universes = ["indices", "watchlist"]
+max_candidates = 50
 ```
 
-That keeps eight variants from multiplying the full production candidate cap by eight. If you add many more variants, lower these caps or stagger cadences further.
+That avoids broad TradingView MCP scanner discovery while still letting every variant rank the same candidate set. If you re-enable `screener.source = "mcp"`, keep `[provider.cache]` enabled so every variant reuses `data/provider-cache.sqlite3`, lower the caps, or stagger cadences further.
 
 ## Commands
 

@@ -8,16 +8,17 @@ The current runtime scores all candidates before acting, processes SELL exits fi
 
 ## Candidate universe and screener mode
 
-The baseline universe is always the configured `[[watchlist]]`, but the watchlist is now only a guaranteed seed. With `[screener] enabled = true`, `screener.source` controls where additional candidates come from:
+The baseline universe is always the configured `[[watchlist]]`. With `[screener] enabled = true`, `screener.source` controls where additional candidates come from:
 
 - `curated` — add local baskets before making expensive market-data calls.
-- `mcp` — query TradingView MCP scanner tools across `screener.exchanges`, dedupe the discovered symbols, then deep-score the best candidates. This is the preferred “screen the market, then rank opportunities” mode.
+- `mcp` — query TradingView MCP scanner tools across `screener.exchanges`, dedupe the discovered symbols, then deep-score the best candidates. This is the broad “screen the market, then rank opportunities” mode, but it can burn many TradingView requests without shared caching.
 - `hybrid` — use both dynamic MCP scanner output and local curated baskets.
 
 Supported local screener universes:
 
 - `watchlist` — the configured `[[watchlist]]` entries.
-- `etf_core` — broad ETFs such as SPY, QQQ, IWM, DIA, VTI, sector/semiconductor/treasury/gold ETFs.
+- `indices` — the core index ETFs SPY, QQQ, IWM, DIA, and VTI.
+- `etf_core` — broader ETFs such as SPY, QQQ, IWM, DIA, VTI, sector/semiconductor/treasury/gold ETFs.
 - `nasdaq_mega` — liquid mega-cap NASDAQ names.
 - `nyse_mega` — liquid mega-cap NYSE names.
 - `ai_infra` — AI infrastructure, semis, power/grid, networking, and space/defense names.
@@ -142,7 +143,7 @@ When Alpaca paper order submission is enabled, slippage is not applied locally t
 
 `max_open_positions` is a ceiling, not a target. Increasing it only removes the count blocker. The bot still needs qualifying scores, RSI, price, cash, and one-position-per-symbol gates before it opens trades.
 
-The practical maximum number of open positions is currently constrained by the unique symbols that reach the deep-scoring pass. In `screener.source = "mcp"` mode, that set is dynamic scanner output plus the watchlist seed and any currently open symbols, not just the manually listed watchlist.
+The practical maximum number of open positions is currently constrained by the unique symbols that reach the deep-scoring pass. In the current `screener.source = "curated"` setup, that means the capped index-plus-watchlist universe plus any currently open symbols protected for exit checks. In `screener.source = "mcp"` mode, the set becomes dynamic scanner output plus the watchlist seed and open symbols.
 
 ## Watchlist order bias
 
@@ -152,7 +153,8 @@ Watchlist-order bias is fixed when `[selection] mode = "ranked"`. Earlier symbol
 
 At the time this documentation was written, `config.paper.toml` used:
 
-- MCP scanner discovery enabled with `screener.source = "mcp"`, `screener.exchanges = ["NASDAQ", "NYSE", "BINANCE", "KUCOIN"]`, and dynamic sources such as rating filters, volume breakout, smart volume, and top gainers
+- MCP scanner discovery disabled with `screener.source = "curated"`; the bot scores a capped top-50 universe made from core index ETFs plus the configured watchlist
+- `screener.max_candidates = 50`
 - `max_open_positions = 25`
 - `max_position_pct = 0.10`
 - `entry_score = 65`

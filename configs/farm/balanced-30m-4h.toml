@@ -14,9 +14,9 @@ initial_delay_seconds = 120
 timeframe = "4h"
 
 [screener]
-per_source_limit = 10
-max_candidates = 12
-dynamic_sources = ["rating_strong_buy", "rating_buy", "volume_breakout", "top_gainers"]
+source = "curated"
+universes = ["indices", "watchlist"]
+max_candidates = 50
 
 [broker]
 submit_orders = false

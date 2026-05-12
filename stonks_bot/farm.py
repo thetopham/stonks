@@ -136,6 +136,8 @@ def summarize_variant(variant: FarmVariant) -> dict[str, Any]:
             "max_candidates": config.screener.max_candidates,
             "per_source_limit": config.screener.per_source_limit,
             "dynamic_sources": config.screener.dynamic_sources,
+            "provider_cache_enabled": config.provider.cache_enabled,
+            "provider_cache_path": str(config.provider.cache_path),
             "broker_submit_orders": config.broker.submit_orders,
             "options_auto_trade": config.options.auto_trade,
             "options_submit_orders": config.options.submit_orders,

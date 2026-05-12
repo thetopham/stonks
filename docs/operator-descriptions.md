@@ -50,7 +50,7 @@ The dashboard reads the SQLite ledger and config. It does not call TradingView, 
 - `selection.mode`: `ranked` scores all candidates before buying so later high-score symbols can beat earlier low-score symbols. `sequential` preserves old watchlist-order behavior for comparison.
 - `selection.preview_top`: Number of ranked candidates printed in scan/screener reports.
 - `screener.enabled`: When false, only the watchlist is scored. When true, `screener.source` decides how additional candidates are discovered before deep analysis.
-- `screener.source`: `curated` uses local baskets, `mcp` uses dynamic TradingView MCP scanner output across configured exchanges, and `hybrid` uses both. `mcp` is the broad-screening mode; symbols do not need to be manually added one by one.
+- `screener.source`: `curated` uses local baskets/watchlists, `mcp` uses dynamic TradingView MCP scanner output across configured exchanges, and `hybrid` uses both. The local paper config currently uses `curated` with a top-50 cap to avoid broad TradingView scanner rate limits.
 - `screener.universes`: Local candidate baskets for `curated`/`hybrid`: `watchlist`, `etf_core`, `nasdaq_mega`, `nyse_mega`, and `ai_infra`. In `mcp` mode the watchlist acts as a guaranteed seed/fallback.
 - `screener.exchanges`: Exchanges sent to the MCP scanner discovery pass, such as `NASDAQ` and `NYSE`.
 - `screener.dynamic_sources`: MCP scanner families used for discovery, such as `rating_strong_buy`, `rating_buy`, `volume_breakout`, `smart_volume`, `top_gainers`, `top_losers`, and `bollinger_squeeze`.

@@ -6,7 +6,7 @@ Safety boundary: paper trading only. By default, the trading loop records local 
 
 ## Strategy summary
 
-The bot builds a candidate universe, asks TradingView MCP for `combined_analysis`, converts every response into a 0-100 technical score, ranks candidates, then records simulated paper BUY/SELL fills in SQLite. With `screener.source = "mcp"`, the universe starts with dynamic TradingView MCP scanner output across configured equity and crypto exchanges, so you do not need to manually add every possible symbol to the config; the watchlist is only a guaranteed seed/fallback.
+The bot builds a candidate universe, asks TradingView MCP for `combined_analysis`, converts every response into a 0-100 technical score, ranks candidates, then records simulated paper BUY/SELL fills in SQLite. The local paper config currently uses `screener.source = "curated"` with a capped top-50 universe made from core index ETFs plus the configured watchlist, so the main bot and strategy farm do not hammer broad-market TradingView scanner endpoints.
 
 Default behavior:
 
@@ -55,7 +55,7 @@ timeframe = "4h"
 
 ## Commands
 
-`stonks-paper screen --config config.paper.toml` runs the read-only ranked screener. In `screener.source = "mcp"` mode it first asks TradingView MCP scanner tools for broad-market stock and crypto candidates across configured exchanges, then deep-scores the capped candidate set and prints the sorted list without broker orders or ledger trades.
+`stonks-paper screen --config config.paper.toml` runs the read-only ranked screener. In the current curated mode it deep-scores the capped top-50 index-plus-watchlist universe and prints the sorted list without broker orders or ledger trades. Dynamic `screener.source = "mcp"` remains available for broad-market discovery, but should stay off unless the shared cache/throttle stays healthy.
 
 `stonks-paper run-once --config config.paper.toml` scans the configured universe one time. With `broker.submit_orders=false`, it creates simulated local paper BUY/SELL fills. With `broker.submit_orders=true`, equity orders use the Alpaca paper endpoint and record only confirmed fills; regular mode uses market orders only when the Alpaca clock is open, while `broker.equity_extended_hours=true` switches equities to 24/5-compatible limit orders with `extended_hours=true`. Crypto paper orders submit directly to supported Alpaca crypto pairs such as `BTC/USD`; only confirmed filled paper orders are recorded in SQLite.
 

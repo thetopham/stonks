@@ -31,12 +31,13 @@ preview_top = 10
 # hybrid = MCP screeners plus curated local baskets.
 enabled = false
 source = "curated"
-universes = ["watchlist", "etf_core", "nasdaq_mega", "nyse_mega", "ai_infra", "crypto_major"]
+universes = ["indices", "watchlist"]
 exchanges = ["NASDAQ", "NYSE", "BINANCE", "KUCOIN"]
-dynamic_sources = ["rating_strong_buy", "rating_buy", "volume_breakout", "smart_volume", "top_gainers"]
-per_source_limit = 50
-max_candidates = 100
+dynamic_sources = []
+per_source_limit = 10
+max_candidates = 50
 exclude_symbols = []
+
 
 [optimizer]
 enabled = true
@@ -79,6 +80,15 @@ max_underlyings_per_scan = 20
 command = "/home/matt/.local/bin/uvx"
 args = ["--from", "tradingview-mcp-server", "tradingview-mcp"]
 timeframe = "4h"
+
+[provider.cache]
+enabled = true
+path = "data/provider-cache.sqlite3"
+ttl_seconds = 300
+stale_seconds = 21600
+rate_limit_cooldown_seconds = 900
+min_upstream_interval_seconds = 5
+allow_stale_on_error = true
 
 [broker]
 name = "alpaca"

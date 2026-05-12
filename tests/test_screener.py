@@ -46,6 +46,28 @@ def test_mcp_source_static_universe_uses_watchlist_only(tmp_path):
     assert [(item.symbol, item.exchange) for item in candidates] == [("AAPL", "NASDAQ"), ("QQQ", "NASDAQ")]
 
 
+def test_indices_universe_adds_core_index_etfs_without_full_market_scan(tmp_path):
+    config = _config(tmp_path)
+    config.screener = ScreenerConfig(
+        enabled=True,
+        source="curated",
+        universes=["indices", "watchlist"],
+        max_candidates=8,
+        exclude_symbols=[],
+    )
+
+    candidates = build_static_candidate_universe(config)
+
+    assert [(item.symbol, item.exchange) for item in candidates] == [
+        ("SPY", "NYSE"),
+        ("QQQ", "NASDAQ"),
+        ("IWM", "NYSE"),
+        ("DIA", "NYSE"),
+        ("VTI", "NYSE"),
+        ("AAPL", "NASDAQ"),
+    ]
+
+
 def test_merge_candidate_universes_caps_dynamic_candidates_but_protects_open_positions(tmp_path):
     config = _config(tmp_path)
     config.screener.max_candidates = 2

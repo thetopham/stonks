@@ -33,14 +33,24 @@ Every farm variant must remain local-only:
 
 ## Keep MCP load bounded
 
-Farm runs multiply TradingView MCP usage across variants. Keep these lower than the main bot unless you intentionally want a heavier test:
+Farm runs multiply TradingView MCP usage across variants. The current farm keeps discovery disabled and reuses the capped top-50 curated universe: core index ETFs first, then the configured watchlist.
 
 ```toml
 [screener]
-per_source_limit = 10
-max_candidates = 12
-dynamic_sources = ["rating_strong_buy", "rating_buy", "volume_breakout", "top_gainers"]
+source = "curated"
+universes = ["indices", "watchlist"]
+max_candidates = 50
 ```
+
+If you re-enable dynamic `screener.source = "mcp"`, keep the shared cache/throttle protection on or keep per-variant caps very small. All current farm variants inherit:
+
+```toml
+[provider.cache]
+enabled = true
+path = "data/provider-cache.sqlite3"
+```
+
+That means the main bot and farm variants on this host reuse the same MCP tool-result snapshots instead of refreshing the same symbol/timeframe independently.
 
 ## Add a variant
 
