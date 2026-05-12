@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Protocol
 
 from .config import BotConfig
 from .ledger import PaperLedger
-from .models import Position, WatchItem, default_crypto_broker_symbol
+from .market_hours import equity_market_hours_state
+from .models import Position, WatchItem, default_crypto_broker_symbol, infer_asset_class
 from .screener import build_static_candidate_universe, merge_candidate_universes
 from .strategy import Signal, generate_signal
 
@@ -46,6 +48,32 @@ class BrokerExecutor(Protocol):
     def submit_crypto_sell(self, symbol: str, quantity: float) -> BrokerFillLike: ...
 
 
+def _item_is_equity(item: WatchItem) -> bool:
+    return item.asset_class != "crypto" and infer_asset_class(item.exchange, item.asset_class) == "equity"
+
+
+def _filter_equity_candidates_when_closed(items: list[WatchItem], *, equity_session_open: bool) -> tuple[list[WatchItem], int]:
+    if equity_session_open:
+        return items, 0
+    active: list[WatchItem] = []
+    paused = 0
+    for item in items:
+        if _item_is_equity(item):
+            paused += 1
+        else:
+            active.append(item)
+    return active, paused
+
+
+def _equity_pause_note(paused_count: int, reason: str) -> str | None:
+    if paused_count <= 0:
+        return None
+    noun = "candidate" if paused_count == 1 else "candidates"
+    if not reason.lower().startswith("equity session closed"):
+        reason = f"Equity session closed: {reason}"
+    return f"{reason}; paused {paused_count} equity {noun}; crypto remains active"
+
+
 @dataclass(slots=True)
 class CandidateEvaluation:
     item: WatchItem
@@ -73,6 +101,17 @@ def _broker_symbol(item: WatchItem) -> str | None:
     if item.asset_class != "crypto":
         return item.symbol
     return item.broker_symbol or default_crypto_broker_symbol(item.symbol)
+
+def _active_equity_hours(config: BotConfig, now: datetime | None) -> tuple[bool, str]:
+    if not config.execution.market_hours_only:
+        return True, "US equity market-hours throttle disabled"
+    state = equity_market_hours_state(
+        now=now,
+        timezone_name=config.execution.market_timezone,
+        open_time=config.execution.market_open,
+        close_time=config.execution.market_close,
+    )
+    return state.is_open, state.reason
 
 
 def _metadata_for_item(item: WatchItem) -> dict:
@@ -157,7 +196,14 @@ def _buy_notional(config: BotConfig, ledger: PaperLedger) -> float:
     return min(base_notional, spendable_cash, ledger.cash)
 
 
-async def _candidate_universe(config: BotConfig, ledger: PaperLedger, provider: AnalysisProvider) -> tuple[list[WatchItem], list[str]]:
+async def _candidate_universe(
+    config: BotConfig,
+    ledger: PaperLedger,
+    provider: AnalysisProvider,
+    *,
+    now: datetime | None = None,
+) -> tuple[list[WatchItem], list[str]]:
+    equity_session_open, equity_reason = _active_equity_hours(config, now)
     open_items = [
         WatchItem(
             position.symbol,
@@ -175,15 +221,41 @@ async def _candidate_universe(config: BotConfig, ledger: PaperLedger, provider: 
     if config.screener.enabled and config.screener.source in {"mcp", "hybrid"}:
         discover = getattr(provider, "discover_candidates", None)
         if callable(discover):
-            dynamic_items = await discover(
-                config.screener.exchanges,
-                config.provider.timeframe,
-                config.screener.dynamic_sources,
-                config.screener.per_source_limit,
-            )
-            discovery_notes = list(getattr(provider, "last_discovery_notes", []))
+            discovery_exchanges = list(config.screener.exchanges)
+            skipped_equity_exchanges = 0
+            if not equity_session_open:
+                active_exchanges = []
+                for exchange in discovery_exchanges:
+                    if infer_asset_class(exchange) == "crypto":
+                        active_exchanges.append(exchange)
+                    else:
+                        skipped_equity_exchanges += 1
+                discovery_exchanges = active_exchanges
+                if skipped_equity_exchanges:
+                    discovery_notes.append(f"{equity_reason}; paused equity MCP discovery")
+            if discovery_exchanges and config.screener.dynamic_sources:
+                dynamic_items = await discover(
+                    discovery_exchanges,
+                    config.provider.timeframe,
+                    config.screener.dynamic_sources,
+                    config.screener.per_source_limit,
+                )
+                discovery_notes.extend(list(getattr(provider, "last_discovery_notes", [])))
         else:
             discovery_notes = ["mcp-discovery=unavailable-on-provider"]
+
+    if not equity_session_open:
+        paused_symbols = {
+            item.symbol
+            for item in [*open_items, *dynamic_items, *static_items]
+            if _item_is_equity(item)
+        }
+        open_items, _ = _filter_equity_candidates_when_closed(open_items, equity_session_open=equity_session_open)
+        dynamic_items, _ = _filter_equity_candidates_when_closed(dynamic_items, equity_session_open=equity_session_open)
+        static_items, _ = _filter_equity_candidates_when_closed(static_items, equity_session_open=equity_session_open)
+        note = _equity_pause_note(len(paused_symbols), equity_reason)
+        if note is not None:
+            discovery_notes.append(note)
 
     if config.screener.enabled and config.screener.source in {"mcp", "hybrid"}:
         # Dynamic MCP results are the primary broad-market source. The watchlist
@@ -195,9 +267,15 @@ async def _candidate_universe(config: BotConfig, ledger: PaperLedger, provider: 
     return merged, discovery_notes
 
 
-async def _evaluate_candidates(config: BotConfig, ledger: PaperLedger, provider: AnalysisProvider) -> tuple[list[CandidateEvaluation], list[str]]:
+async def _evaluate_candidates(
+    config: BotConfig,
+    ledger: PaperLedger,
+    provider: AnalysisProvider,
+    *,
+    now: datetime | None = None,
+) -> tuple[list[CandidateEvaluation], list[str]]:
     evaluations: list[CandidateEvaluation] = []
-    candidates, discovery_notes = await _candidate_universe(config, ledger, provider)
+    candidates, discovery_notes = await _candidate_universe(config, ledger, provider, now=now)
     for item in candidates:
         analysis = await provider.combined_analysis(item.symbol, item.exchange, config.provider.timeframe)
         position = ledger.get_position(item.symbol)
@@ -391,11 +469,11 @@ def _execute_buy(
     return True, f"PAPER BUY {trade.symbol}: qty={trade.quantity:.4f} @ {trade.price:.2f}, notional={trade.notional:.2f}, score={signal.score:.1f}, adj={evaluation.portfolio_score:.1f}"
 
 
-async def screen_once(config: BotConfig, ledger: PaperLedger, provider: AnalysisProvider) -> str:
+async def screen_once(config: BotConfig, ledger: PaperLedger, provider: AnalysisProvider, *, now: datetime | None = None) -> str:
     if not config.execution.dry_run or config.execution.live_trading_enabled:
         raise ValueError("refusing to run: paper trading only")
 
-    evaluations, discovery_notes = await _evaluate_candidates(config, ledger, provider)
+    evaluations, discovery_notes = await _evaluate_candidates(config, ledger, provider, now=now)
     rows = _ordered_screen_rows(config, evaluations)
     lines = [
         "stonks-paper-bot screener",
@@ -417,7 +495,14 @@ async def screen_once(config: BotConfig, ledger: PaperLedger, provider: Analysis
     return "\n".join(lines)
 
 
-async def run_once(config: BotConfig, ledger: PaperLedger, provider: AnalysisProvider, broker: BrokerExecutor | None = None) -> str:
+async def run_once(
+    config: BotConfig,
+    ledger: PaperLedger,
+    provider: AnalysisProvider,
+    broker: BrokerExecutor | None = None,
+    *,
+    now: datetime | None = None,
+) -> str:
     if not config.execution.dry_run or config.execution.live_trading_enabled:
         raise ValueError("refusing to run: paper trading only")
     if config.broker.submit_orders and broker is None:
@@ -432,7 +517,7 @@ async def run_once(config: BotConfig, ledger: PaperLedger, provider: AnalysisPro
             market_states[extended_hours] = broker.market_is_open(extended_hours=extended_hours)
         return market_states[extended_hours]
 
-    evaluations, discovery_notes = await _evaluate_candidates(config, ledger, provider)
+    evaluations, discovery_notes = await _evaluate_candidates(config, ledger, provider, now=now)
     if discovery_notes:
         lines.append("Discovery: " + "; ".join(discovery_notes[:12]))
 

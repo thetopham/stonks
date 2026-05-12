@@ -16,13 +16,14 @@ from .alpaca import (
     load_alpaca_credentials,
     load_default_env_files,
 )
-from .config import load_config
+from .config import BotConfig, load_config
 from .farm import FarmVariant, assert_shadow_safe, collect_farm_status, discover_farm_variants, format_farm_status
 from .ledger import PaperLedger
+from .market_hours import MarketHoursState, equity_market_hours_state, seconds_until_next_open
 from .options import OptionsPaperLedger, format_options_status, options_paper_once, options_scan_once, sync_options_cash_from_account
 from .dashboard import serve_dashboard
 from .mcp_client import TradingViewMCPProvider
-from .models import WatchItem
+from .models import WatchItem, infer_asset_class
 from .research import (
     build_backtest_experiments,
     config_to_jsonable,
@@ -31,6 +32,7 @@ from .research import (
     run_backtest_farm,
 )
 from .runner import format_status, run_once, screen_once
+from .screener import build_static_candidate_universe
 
 
 def _copy_example(destination: Path) -> None:
@@ -63,17 +65,101 @@ def _tradingview_provider(config):
     )
 
 
+class _NoopProvider:
+    last_discovery_notes: list[str] = []
+
+    async def discover_candidates(self, exchanges, timeframe, sources, per_source_limit):
+        self.last_discovery_notes = []
+        return []
+
+    async def combined_analysis(self, symbol, exchange, timeframe):  # pragma: no cover - defensive guard
+        raise RuntimeError(f"provider should not be called while equity scan is paused: {symbol}:{exchange}")
+
+
+def _equity_hours_state(config: BotConfig, *, now: datetime | None = None) -> MarketHoursState | None:
+    if not config.execution.market_hours_only:
+        return None
+    return equity_market_hours_state(
+        now=now,
+        timezone_name=config.execution.market_timezone,
+        open_time=config.execution.market_open,
+        close_time=config.execution.market_close,
+    )
+
+
+def _item_is_crypto(item: WatchItem) -> bool:
+    return infer_asset_class(item.exchange, item.asset_class) == "crypto"
+
+
+def _ledger_items(ledger: PaperLedger) -> list[WatchItem]:
+    return [
+        WatchItem(
+            position.symbol,
+            position.exchange,
+            str(position.metadata.get("asset_class") or "auto"),
+            str(position.metadata.get("broker_symbol") or "") or None,
+        )
+        for position in ledger.list_positions()
+    ]
+
+
+def _has_crypto_work(config: BotConfig, ledger: PaperLedger) -> bool:
+    candidates = [*_ledger_items(ledger), *build_static_candidate_universe(config, cap=False)]
+    if any(_item_is_crypto(item) for item in candidates):
+        return True
+    if config.screener.enabled and config.screener.source in {"mcp", "hybrid"} and config.screener.dynamic_sources:
+        return any(infer_asset_class(exchange) == "crypto" for exchange in config.screener.exchanges)
+    return False
+
+
+def _provider_pause_state(
+    config: BotConfig,
+    ledger: PaperLedger,
+    *,
+    now: datetime | None = None,
+    pause_all_after_hours: bool = False,
+) -> MarketHoursState | None:
+    state = _equity_hours_state(config, now=now)
+    if state is None or state.is_open:
+        return None
+    if pause_all_after_hours:
+        return state
+    if _has_crypto_work(config, ledger):
+        return None
+    return state
+
+
+def _paused_scan_report(config: BotConfig, ledger: PaperLedger, state: MarketHoursState) -> str:
+    return "\n".join(
+        [
+            "stonks-paper-bot scan",
+            "Boundary: LOCAL PAPER ONLY — no broker orders, no live execution",
+            f"Discovery: {state.reason}; provider scan paused; no MCP calls submitted",
+            format_status(config, ledger, compact=True),
+        ]
+    )
+
+
 async def _run_once(config_path: Path) -> str:
     config, broker = _build_broker_if_enabled(config_path)
     ledger = PaperLedger(config.ledger_path, starting_cash=config.starting_cash)
-    async with _tradingview_provider(config) as provider:
-        return await run_once(config, ledger, provider, broker=broker)
+    try:
+        pause_state = _provider_pause_state(config, ledger)
+        if pause_state is not None:
+            return await run_once(config, ledger, _NoopProvider(), broker=broker, now=pause_state.local_now)
+        async with _tradingview_provider(config) as provider:
+            return await run_once(config, ledger, provider, broker=broker)
+    finally:
+        ledger.close()
 
 
 async def _screen_once(config_path: Path) -> str:
     config = load_config(config_path)
     ledger = PaperLedger(config.ledger_path, starting_cash=config.starting_cash)
     try:
+        pause_state = _provider_pause_state(config, ledger)
+        if pause_state is not None:
+            return await screen_once(config, ledger, _NoopProvider(), now=pause_state.local_now)
         async with _tradingview_provider(config) as provider:
             return await screen_once(config, ledger, provider)
     finally:
@@ -129,20 +215,28 @@ async def _watch(config_path: Path) -> None:
         except Exception as exc:  # pragma: no cover - defensive around long-running service loop
             print(f"stonks-paper-bot scan failed: {type(exc).__name__}: {exc}", flush=True)
         if config.options.auto_trade:
-            try:
-                print(await _options_paper(config_path), flush=True)
-            except Exception as exc:  # pragma: no cover - defensive around long-running service loop
-                print(f"stonks-paper-bot options auto-trade failed: {type(exc).__name__}: {exc}", flush=True)
+            options_pause_state = _equity_hours_state(config)
+            if options_pause_state is not None and not options_pause_state.is_open:
+                print(f"stonks-paper-bot options auto-trade paused: {options_pause_state.reason}", flush=True)
+            else:
+                try:
+                    print(await _options_paper(config_path), flush=True)
+                except Exception as exc:  # pragma: no cover - defensive around long-running service loop
+                    print(f"stonks-paper-bot options auto-trade failed: {type(exc).__name__}: {exc}", flush=True)
         await asyncio.sleep(config.execution.scan_interval_seconds)
 
 
-async def _farm_run_variant(variant: FarmVariant) -> str:
+async def _farm_run_variant(variant: FarmVariant, *, now: datetime | None = None) -> str:
     config = load_config(variant.path)
     assert_shadow_safe(config, variant_name=variant.name)
     ledger = PaperLedger(config.ledger_path, starting_cash=config.starting_cash)
     try:
-        async with _tradingview_provider(config) as provider:
-            result = await run_once(config, ledger, provider, broker=None)
+        pause_state = _provider_pause_state(config, ledger, now=now)
+        if pause_state is not None:
+            result = _paused_scan_report(config, ledger, pause_state)
+        else:
+            async with _tradingview_provider(config) as provider:
+                result = await run_once(config, ledger, provider, broker=None, now=now)
     finally:
         ledger.close()
     return f"=== farm variant: {variant.name} ({config.provider.timeframe}, {config.execution.scan_interval_seconds // 60}m) ===\n{result}"
@@ -189,11 +283,22 @@ async def _farm_watch(farm_dir: Path, poll_seconds: int) -> None:
                 next_due[variant.name] = now + config.execution.initial_delay_seconds
             if now < next_due[variant.name]:
                 continue
+            pause_state = None
+            ledger = PaperLedger(config.ledger_path, starting_cash=config.starting_cash)
             try:
-                print(await _farm_run_variant(variant), flush=True)
+                pause_state = _provider_pause_state(config, ledger)
+            finally:
+                ledger.close()
+            try:
+                print(await _farm_run_variant(variant, now=pause_state.local_now if pause_state is not None else None), flush=True)
             except Exception as exc:  # pragma: no cover - defensive around long-running farm loop
                 print(f"strategy farm scan failed for {variant.name}: {type(exc).__name__}: {exc}", flush=True)
-            next_due[variant.name] = time.monotonic() + config.execution.scan_interval_seconds
+            if pause_state is not None:
+                sleep_until_open = seconds_until_next_open(pause_state)
+                next_delay = (sleep_until_open + 5) if sleep_until_open is not None else config.execution.scan_interval_seconds
+                next_due[variant.name] = time.monotonic() + max(poll_seconds, next_delay)
+            else:
+                next_due[variant.name] = time.monotonic() + config.execution.scan_interval_seconds
         await asyncio.sleep(max(1, poll_seconds))
 
 

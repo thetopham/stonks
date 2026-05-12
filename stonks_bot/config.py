@@ -14,6 +14,10 @@ class ExecutionConfig:
     live_trading_enabled: bool = False
     scan_interval_seconds: int = 1800
     initial_delay_seconds: int = 0
+    market_hours_only: bool = True
+    market_timezone: str = "America/New_York"
+    market_open: str = "04:00"
+    market_close: str = "20:00"
 
 
 @dataclass(slots=True)
@@ -200,6 +204,10 @@ def load_config(path: str | Path) -> BotConfig:
         live_trading_enabled=bool(execution_data.get("live_trading_enabled", False)),
         scan_interval_seconds=int(execution_data.get("scan_interval_seconds", 1800)),
         initial_delay_seconds=max(0, int(execution_data.get("initial_delay_seconds", 0))),
+        market_hours_only=bool(execution_data.get("market_hours_only", True)),
+        market_timezone=str(execution_data.get("market_timezone", "America/New_York")),
+        market_open=str(execution_data.get("market_open", "04:00")),
+        market_close=str(execution_data.get("market_close", "20:00")),
     )
     if not execution.dry_run or execution.live_trading_enabled:
         raise ValueError("live trading is out of scope for this bot; set dry_run=true and live_trading_enabled=false")

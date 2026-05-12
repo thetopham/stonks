@@ -10,6 +10,11 @@ slippage_pct = 0.02
 [execution]
 dry_run = true
 live_trading_enabled = false
+# Equity symbols pause outside 4:00 AM-8:00 PM ET; crypto symbols remain active.
+market_hours_only = true
+market_timezone = "America/New_York"
+market_open = "04:00"
+market_close = "20:00"
 # Active paper cadence: scan every 30 minutes using 4h technical analysis.
 scan_interval_seconds = 1800
 

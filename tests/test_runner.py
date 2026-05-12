@@ -1,9 +1,23 @@
 import asyncio
 from dataclasses import dataclass
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from stonks_bot.config import BotConfig, BrokerConfig, ExecutionConfig, OptimizerConfig, ProviderConfig, ScreenerConfig, SelectionConfig, StrategyConfig, WatchItem
 from stonks_bot.ledger import PaperLedger
 from stonks_bot.runner import run_once, screen_once
+
+
+MARKET_OPEN_NOW = datetime(2026, 5, 12, 12, 0, tzinfo=ZoneInfo("America/New_York"))
+EQUITY_CLOSED_NOW = datetime(2026, 5, 12, 20, 30, tzinfo=ZoneInfo("America/New_York"))
+
+
+def run_paper_once(config, ledger, provider, broker=None, *, now=MARKET_OPEN_NOW):
+    return asyncio.run(run_once(config, ledger, provider, broker=broker, now=now))
+
+
+def screen_paper_once(config, ledger, provider, *, now=MARKET_OPEN_NOW):
+    return asyncio.run(screen_once(config, ledger, provider, now=now))
 
 
 class FakeProvider:
@@ -176,7 +190,7 @@ def test_ranked_selection_buys_later_higher_score_before_earlier_candidate(tmp_p
         }
     )
 
-    report = asyncio.run(run_once(config, ledger, provider))
+    report = run_paper_once(config, ledger, provider)
 
     assert provider.calls == ["AAPL", "MSFT"]
     assert "Ranked candidates:" in report
@@ -207,7 +221,7 @@ def test_mcp_screener_discovers_dynamic_candidates_before_deep_scoring(tmp_path)
         [WatchItem("NASDAQ:MSFT", "NASDAQ")],
     )
 
-    report = asyncio.run(screen_once(config, ledger, provider))
+    report = screen_paper_once(config, ledger, provider)
 
     assert provider.discovery_requests == [(["NASDAQ"], "1D", ["rating_buy"], 10)]
     assert provider.calls == ["MSFT", "AAPL"]
@@ -234,7 +248,7 @@ def test_mcp_screener_prefers_dynamic_candidates_before_watchlist_when_capped(tm
         [WatchItem("NASDAQ:MSFT", "NASDAQ")],
     )
 
-    report = asyncio.run(screen_once(config, ledger, provider))
+    report = screen_paper_once(config, ledger, provider)
 
     assert provider.calls == ["MSFT"]
     assert "Candidates scored: 1" in report
@@ -254,7 +268,7 @@ def test_screen_once_honors_zero_preview_limit(tmp_path):
         }
     )
 
-    report = asyncio.run(screen_once(config, ledger, provider))
+    report = screen_paper_once(config, ledger, provider)
 
     assert "Candidates scored: 2" in report
     assert "#1" not in report
@@ -276,7 +290,7 @@ def test_optimizer_reserves_cash_and_caps_position_notional(tmp_path):
         }
     )
 
-    report = asyncio.run(run_once(config, ledger, provider))
+    report = run_paper_once(config, ledger, provider)
 
     assert "PAPER BUY AAPL" in report
     assert "SKIP MSFT: optimizer cash reserve reached" in report
@@ -296,7 +310,7 @@ def test_screen_once_ranks_candidates_read_only_without_trades(tmp_path):
         }
     )
 
-    report = asyncio.run(screen_once(config, ledger, provider))
+    report = screen_paper_once(config, ledger, provider)
 
     assert "stonks-paper-bot screener" in report
     assert report.index("MSFT") < report.index("AAPL")
@@ -308,7 +322,7 @@ def test_run_once_executes_only_paper_buy_and_returns_report(tmp_path):
     config = _config(tmp_path)
     ledger = PaperLedger(config.ledger_path, starting_cash=config.starting_cash)
 
-    report = asyncio.run(run_once(config, ledger, FakeProvider()))
+    report = run_paper_once(config, ledger, FakeProvider())
 
     assert "PAPER BUY AAPL" in report
     assert ledger.get_position("AAPL") is not None
@@ -320,7 +334,7 @@ def test_run_once_submits_alpaca_paper_buy_when_broker_orders_enabled(tmp_path):
     ledger = PaperLedger(config.ledger_path, starting_cash=config.starting_cash)
     broker = OpenFakeBroker()
 
-    report = asyncio.run(run_once(config, ledger, FakeProvider(), broker=broker))
+    report = run_paper_once(config, ledger, FakeProvider(), broker=broker)
 
     assert broker.buy_requests == [("AAPL", 1000.0)]
     assert "ALPACA PAPER BUY AAPL" in report
@@ -337,7 +351,7 @@ def test_run_once_fails_closed_when_broker_orders_enabled_without_broker(tmp_pat
     ledger = PaperLedger(config.ledger_path, starting_cash=config.starting_cash)
 
     try:
-        asyncio.run(run_once(config, ledger, FakeProvider()))
+        run_paper_once(config, ledger, FakeProvider())
     except ValueError as exc:
         assert "broker order submission is enabled but no broker executor was provided" in str(exc)
     else:
@@ -349,7 +363,7 @@ def test_run_once_does_not_submit_broker_buy_when_market_is_closed(tmp_path):
     ledger = PaperLedger(config.ledger_path, starting_cash=config.starting_cash)
     broker = ClosedFakeBroker()
 
-    report = asyncio.run(run_once(config, ledger, FakeProvider(), broker=broker))
+    report = run_paper_once(config, ledger, FakeProvider(), broker=broker)
 
     assert broker.buy_requests == []
     assert "BROKER HOLD AAPL: market closed" in report
@@ -366,7 +380,7 @@ def test_run_once_submits_equity_24_5_limit_order_when_extended_hours_enabled(tm
     broker = ExtendedHoursFakeBroker()
     provider = MappingProvider({"AAPL": _analysis(price=100, bias="Bullish", rsi=55, macd="Bullish")})
 
-    report = asyncio.run(run_once(config, ledger, provider, broker=broker))
+    report = run_paper_once(config, ledger, provider, broker=broker)
 
     assert broker.market_requests == [True]
     assert broker.buy_requests == []
@@ -387,7 +401,7 @@ def test_run_once_submits_equity_24_5_limit_sell_when_extended_hours_enabled(tmp
     broker = ExtendedHoursFakeBroker()
     provider = MappingProvider({"AAPL": _analysis(price=90, bias="Bearish", rsi=45, macd="Bearish")})
 
-    report = asyncio.run(run_once(config, ledger, provider, broker=broker))
+    report = run_paper_once(config, ledger, provider, broker=broker)
 
     assert broker.market_requests == [True]
     assert broker.sell_requests == []
@@ -403,7 +417,7 @@ def test_run_once_submits_crypto_paper_buy_with_alpaca_symbol_without_equity_clo
     broker = CryptoFakeBroker()
     provider = MappingProvider({"BTCUSDT": _analysis(price=50_000, bias="Bullish", rsi=55, macd="Bullish")})
 
-    report = asyncio.run(run_once(config, ledger, provider, broker=broker))
+    report = run_paper_once(config, ledger, provider, broker=broker)
 
     assert broker.clock_checks == 0
     assert broker.crypto_buy_requests == [("BTC/USD", 1000.0)]
@@ -413,3 +427,42 @@ def test_run_once_submits_crypto_paper_buy_with_alpaca_symbol_without_equity_clo
     assert position.exchange == "BINANCE"
     assert position.metadata["asset_class"] == "crypto"
     assert position.metadata["broker_symbol"] == "BTC/USD"
+
+
+def test_run_once_after_equity_session_scores_only_crypto_and_pauses_stocks(tmp_path):
+    config = _config(tmp_path)
+    config.watchlist = [
+        WatchItem(symbol="AAPL", exchange="NASDAQ"),
+        WatchItem(symbol="BTCUSDT", exchange="BINANCE", asset_class="crypto", broker_symbol="BTC/USD"),
+    ]
+    ledger = PaperLedger(config.ledger_path, starting_cash=config.starting_cash)
+    provider = MappingProvider({"BTCUSDT": _analysis(price=50_000, bias="Bullish", rsi=55, macd="Bullish")})
+
+    report = run_paper_once(config, ledger, provider, now=EQUITY_CLOSED_NOW)
+
+    assert provider.calls == ["BTCUSDT"]
+    assert "Equity session closed" in report
+    assert "paused 1 equity candidate" in report
+    assert "AAPL" not in report
+    assert "PAPER BUY BTCUSDT" in report
+    assert ledger.get_position("AAPL") is None
+    assert ledger.get_position("BTCUSDT") is not None
+
+
+def test_screen_once_after_equity_session_scores_only_crypto_and_pauses_stocks(tmp_path):
+    config = _config(tmp_path)
+    config.watchlist = [
+        WatchItem(symbol="AAPL", exchange="NASDAQ"),
+        WatchItem(symbol="BTCUSDT", exchange="BINANCE", asset_class="crypto", broker_symbol="BTC/USD"),
+    ]
+    ledger = PaperLedger(config.ledger_path, starting_cash=config.starting_cash)
+    provider = MappingProvider({"BTCUSDT": _analysis(price=50_000, bias="Bullish", rsi=55, macd="Bullish")})
+
+    report = screen_paper_once(config, ledger, provider, now=EQUITY_CLOSED_NOW)
+
+    assert provider.calls == ["BTCUSDT"]
+    assert "Equity session closed" in report
+    assert "paused 1 equity candidate" in report
+    assert "Candidates scored: 1" in report
+    assert "BTCUSDT:BINANCE" in report
+    assert "AAPL" not in report
