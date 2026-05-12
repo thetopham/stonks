@@ -10,7 +10,8 @@ slippage_pct = 0.02
 [execution]
 dry_run = true
 live_trading_enabled = false
-scan_interval_seconds = 900
+# Active paper cadence: scan every 30 minutes using 4h technical analysis.
+scan_interval_seconds = 1800
 
 [strategy]
 entry_score = 65
@@ -30,8 +31,8 @@ preview_top = 10
 # hybrid = MCP screeners plus curated local baskets.
 enabled = false
 source = "curated"
-universes = ["watchlist", "etf_core", "nasdaq_mega", "nyse_mega", "ai_infra"]
-exchanges = ["NASDAQ", "NYSE"]
+universes = ["watchlist", "etf_core", "nasdaq_mega", "nyse_mega", "ai_infra", "crypto_major"]
+exchanges = ["NASDAQ", "NYSE", "BINANCE", "KUCOIN"]
 dynamic_sources = ["rating_strong_buy", "rating_buy", "volume_breakout", "smart_volume", "top_gainers"]
 per_source_limit = 50
 max_candidates = 100
@@ -77,7 +78,7 @@ max_underlyings_per_scan = 20
 [provider]
 command = "/home/matt/.local/bin/uvx"
 args = ["--from", "tradingview-mcp-server", "tradingview-mcp"]
-timeframe = "1D"
+timeframe = "4h"
 
 [broker]
 name = "alpaca"
@@ -86,6 +87,9 @@ key_env = "alpaca_key"
 secret_env = "alpaca_secret"
 paper_only = true
 submit_orders = false
+# Alpaca 24/5 equity trading/overnight orders require account support and use limit orders.
+equity_extended_hours = false
+equity_extended_hours_time_in_force = "day"
 
 [[watchlist]]
 symbol = "AAPL"
@@ -98,3 +102,15 @@ exchange = "NASDAQ"
 [[watchlist]]
 symbol = "SPY"
 exchange = "NYSE"
+
+[[watchlist]]
+symbol = "BTCUSDT"
+exchange = "BINANCE"
+asset_class = "crypto"
+broker_symbol = "BTC/USD"
+
+[[watchlist]]
+symbol = "ETHUSDT"
+exchange = "BINANCE"
+asset_class = "crypto"
+broker_symbol = "ETH/USD"

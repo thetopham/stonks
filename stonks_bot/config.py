@@ -2,16 +2,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 import tomllib
 
-from .models import WatchItem
+from .models import WatchItem, default_crypto_broker_symbol, infer_asset_class, normalize_crypto_broker_symbol
 
 
 @dataclass(slots=True)
 class ExecutionConfig:
     dry_run: bool = True
     live_trading_enabled: bool = False
-    scan_interval_seconds: int = 900
+    scan_interval_seconds: int = 1800
+    initial_delay_seconds: int = 0
 
 
 @dataclass(slots=True)
@@ -57,7 +59,7 @@ class OptimizerConfig:
 class ProviderConfig:
     command: str = "/home/matt/.local/bin/uvx"
     args: list[str] = field(default_factory=lambda: ["--from", "tradingview-mcp-server", "tradingview-mcp"])
-    timeframe: str = "1D"
+    timeframe: str = "4h"
 
 
 @dataclass(slots=True)
@@ -68,6 +70,8 @@ class BrokerConfig:
     secret_env: str = "alpaca_secret"
     paper_only: bool = True
     submit_orders: bool = False
+    equity_extended_hours: bool = False
+    equity_extended_hours_time_in_force: str = "day"
 
 
 @dataclass(slots=True)
@@ -134,15 +138,61 @@ def _str_list(values: object, *, upper: bool = False, lower: bool = False) -> li
     return result
 
 
+def _normalize_provider_timeframe(value: object) -> str:
+    text = str(value or "4h").strip() or "4h"
+    lower = text.lower()
+    if lower in {"1m", "5m", "15m", "30m", "1h", "2h", "4h"}:
+        return lower
+    if lower in {"1d", "d", "day", "daily"}:
+        return "1d"
+    if lower in {"1w", "w", "week", "weekly"}:
+        return "1W"
+    if lower in {"1mth", "1mo", "1mon", "month", "monthly"}:
+        return "1M"
+    if text == "1M":
+        return "1M"
+    return text
+
+
+def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(base)
+    for key, value in override.items():
+        if key == "extends":
+            continue
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _load_toml_with_extends(path: Path, seen: set[Path] | None = None) -> dict[str, Any]:
+    path = path.expanduser().resolve()
+    seen = set() if seen is None else seen
+    if path in seen:
+        raise ValueError(f"circular config extends detected at {path}")
+    seen.add(path)
+    data = tomllib.loads(path.read_text())
+    parent = data.get("extends")
+    if not parent:
+        return data
+    parent_path = Path(str(parent)).expanduser()
+    if not parent_path.is_absolute():
+        parent_path = path.parent / parent_path
+    parent_data = _load_toml_with_extends(parent_path, seen)
+    return _deep_merge(parent_data, data)
+
+
 def load_config(path: str | Path) -> BotConfig:
     path = Path(path)
-    data = tomllib.loads(path.read_text())
+    data = _load_toml_with_extends(path)
 
     execution_data = data.get("execution", {})
     execution = ExecutionConfig(
         dry_run=bool(execution_data.get("dry_run", True)),
         live_trading_enabled=bool(execution_data.get("live_trading_enabled", False)),
-        scan_interval_seconds=int(execution_data.get("scan_interval_seconds", 900)),
+        scan_interval_seconds=int(execution_data.get("scan_interval_seconds", 1800)),
+        initial_delay_seconds=max(0, int(execution_data.get("initial_delay_seconds", 0))),
     )
     if not execution.dry_run or execution.live_trading_enabled:
         raise ValueError("live trading is out of scope for this bot; set dry_run=true and live_trading_enabled=false")
@@ -199,10 +249,13 @@ def load_config(path: str | Path) -> BotConfig:
     provider = ProviderConfig(
         command=str(provider_data.get("command", "/home/matt/.local/bin/uvx")),
         args=[str(arg) for arg in provider_data.get("args", ["--from", "tradingview-mcp-server", "tradingview-mcp"])],
-        timeframe=str(provider_data.get("timeframe", "1D")),
+        timeframe=_normalize_provider_timeframe(provider_data.get("timeframe", "4h")),
     )
 
     broker_data = data.get("broker", {})
+    equity_extended_hours_time_in_force = str(broker_data.get("equity_extended_hours_time_in_force", "day")).strip().lower() or "day"
+    if equity_extended_hours_time_in_force not in {"day", "gtc"}:
+        raise ValueError("broker.equity_extended_hours_time_in_force must be 'day' or 'gtc'")
     broker = BrokerConfig(
         name=str(broker_data.get("name", "none")).lower(),
         endpoint_env=str(broker_data.get("endpoint_env", "alpaca_endpoint")),
@@ -210,6 +263,8 @@ def load_config(path: str | Path) -> BotConfig:
         secret_env=str(broker_data.get("secret_env", "alpaca_secret")),
         paper_only=bool(broker_data.get("paper_only", True)),
         submit_orders=bool(broker_data.get("submit_orders", False)),
+        equity_extended_hours=bool(broker_data.get("equity_extended_hours", False)),
+        equity_extended_hours_time_in_force=equity_extended_hours_time_in_force,
     )
     if not broker.paper_only:
         raise ValueError("broker config must remain paper_only=true")
@@ -257,10 +312,22 @@ def load_config(path: str | Path) -> BotConfig:
         if not broker.submit_orders or broker.name != "alpaca":
             raise ValueError("options broker order submission requires [broker].name='alpaca' and [broker].submit_orders=true")
 
-    watchlist = [
-        WatchItem(symbol=str(item["symbol"]).upper(), exchange=str(item.get("exchange", "NASDAQ")).upper())
-        for item in data.get("watchlist", [])
-    ]
+    watchlist: list[WatchItem] = []
+    for item in data.get("watchlist", []):
+        exchange = str(item.get("exchange", "NASDAQ")).upper()
+        symbol = str(item["symbol"]).upper()
+        asset_class = infer_asset_class(exchange, item.get("asset_class"))
+        broker_symbol = normalize_crypto_broker_symbol(item.get("broker_symbol"))
+        if asset_class == "crypto":
+            broker_symbol = broker_symbol or default_crypto_broker_symbol(symbol)
+        watchlist.append(
+            WatchItem(
+                symbol=symbol,
+                exchange=exchange,
+                asset_class=asset_class,
+                broker_symbol=broker_symbol,
+            )
+        )
     if not watchlist:
         raise ValueError("config must include at least one [[watchlist]] item")
 

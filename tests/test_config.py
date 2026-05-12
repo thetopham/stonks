@@ -42,6 +42,7 @@ exchange = "NASDAQ"
     assert config.execution.live_trading_enabled is False
     assert config.ledger_path == Path("ledger.sqlite3")
     assert config.watchlist[0].symbol == "AAPL"
+    assert config.provider.timeframe == "1d"
 
 
 def test_live_trading_enabled_is_rejected(tmp_path):
@@ -258,6 +259,8 @@ exchange = "NASDAQ"
 
     config = load_config(cfg_path)
 
+    assert config.execution.scan_interval_seconds == 1800
+    assert config.execution.initial_delay_seconds == 0
     assert config.selection.mode == "ranked"
     assert config.selection.preview_top == 7
     assert config.screener.enabled is True
@@ -272,3 +275,107 @@ exchange = "NASDAQ"
     assert config.optimizer.cash_reserve_pct == 0.20
     assert config.optimizer.max_new_buys_per_scan == 2
     assert config.optimizer.min_position_notional == 100
+    assert config.provider.timeframe == "4h"
+
+
+def test_load_config_reads_alpaca_equity_extended_hours_knobs(tmp_path):
+    cfg_path = tmp_path / "extended-hours.toml"
+    cfg_path.write_text(
+        """
+ledger_path = "ledger.sqlite3"
+
+[execution]
+dry_run = true
+live_trading_enabled = false
+
+[broker]
+name = "alpaca"
+paper_only = true
+submit_orders = true
+equity_extended_hours = true
+equity_extended_hours_time_in_force = "gtc"
+
+[[watchlist]]
+symbol = "AAPL"
+exchange = "NASDAQ"
+"""
+    )
+
+    config = load_config(cfg_path)
+
+    assert config.broker.equity_extended_hours is True
+    assert config.broker.equity_extended_hours_time_in_force == "gtc"
+
+
+def test_load_config_rejects_invalid_equity_extended_hours_time_in_force(tmp_path):
+    cfg_path = tmp_path / "bad-extended-hours.toml"
+    cfg_path.write_text(
+        """
+ledger_path = "ledger.sqlite3"
+
+[execution]
+dry_run = true
+live_trading_enabled = false
+
+[broker]
+name = "alpaca"
+paper_only = true
+submit_orders = true
+equity_extended_hours = true
+equity_extended_hours_time_in_force = "ioc"
+
+[[watchlist]]
+symbol = "AAPL"
+exchange = "NASDAQ"
+"""
+    )
+
+    try:
+        load_config(cfg_path)
+    except ValueError as exc:
+        assert "equity_extended_hours_time_in_force" in str(exc)
+    else:
+        raise AssertionError("expected invalid extended-hours TIF to be rejected")
+
+
+def test_load_config_reads_crypto_watchlist_metadata_and_infers_crypto_exchanges(tmp_path):
+    cfg_path = tmp_path / "crypto.toml"
+    cfg_path.write_text(
+        """
+ledger_path = "ledger.sqlite3"
+
+[execution]
+dry_run = true
+live_trading_enabled = false
+
+[screener]
+enabled = true
+source = "mcp"
+exchanges = ["NASDAQ", "BINANCE", "KUCOIN"]
+
+[[watchlist]]
+symbol = "AAPL"
+exchange = "NASDAQ"
+
+[[watchlist]]
+symbol = "BTCUSDT"
+exchange = "BINANCE"
+asset_class = "crypto"
+broker_symbol = "BTC/USD"
+
+[[watchlist]]
+symbol = "ETHUSDT"
+exchange = "KUCOIN"
+broker_symbol = "ETH/USD"
+"""
+    )
+
+    config = load_config(cfg_path)
+
+    assert config.screener.exchanges == ["NASDAQ", "BINANCE", "KUCOIN"]
+    assert config.watchlist[0].asset_class == "equity"
+    assert config.watchlist[1].symbol == "BTCUSDT"
+    assert config.watchlist[1].asset_class == "crypto"
+    assert config.watchlist[1].broker_symbol == "BTC/USD"
+    assert config.watchlist[2].asset_class == "crypto"
+    assert config.watchlist[2].broker_symbol == "ETH/USD"

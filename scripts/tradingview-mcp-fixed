@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+set -euo pipefail
+exec /home/matt/.local/bin/uv run --quiet --with tradingview-mcp-server python /home/matt/workspace/stonks-paper-bot/scripts/tradingview_mcp_fixed.py "$@"

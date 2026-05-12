@@ -6,19 +6,35 @@ from typing import Any
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
-from .models import WatchItem
+from .models import WatchItem, default_crypto_broker_symbol, infer_asset_class
 from .screener import normalize_watch_item
 
 
 class TradingViewMCPProvider:
-    def __init__(self, command: str, args: list[str], timeframe: str = "1D"):
+    def __init__(self, command: str, args: list[str], timeframe: str = "1d"):
         self.command = command
         self.args = args
-        self.timeframe = timeframe
+        self.timeframe = self._normalize_timeframe(timeframe)
         self.last_discovery_notes: list[str] = []
         self._stdio_context = None
         self._session_context = None
         self._session: ClientSession | None = None
+
+    @staticmethod
+    def _normalize_timeframe(value: object) -> str:
+        text = str(value or "1d").strip() or "1d"
+        lower = text.lower()
+        if lower in {"1m", "5m", "15m", "30m", "1h", "2h", "4h"}:
+            return lower
+        if lower in {"1d", "d", "day", "daily"}:
+            return "1d"
+        if lower in {"1w", "w", "week", "weekly"}:
+            return "1W"
+        if lower in {"1mth", "1mo", "1mon", "month", "monthly"}:
+            return "1M"
+        if text == "1M":
+            return "1M"
+        return text
 
     async def __aenter__(self) -> "TradingViewMCPProvider":
         params = StdioServerParameters(command=self.command, args=self.args)
@@ -55,6 +71,7 @@ class TradingViewMCPProvider:
     @staticmethod
     def _tool_call_for_source(source: str, exchange: str, timeframe: str, limit: int) -> tuple[str, dict[str, Any]] | None:
         source = source.strip().lower()
+        timeframe = TradingViewMCPProvider._normalize_timeframe(timeframe)
         if source == "top_gainers":
             return "top_gainers", {"exchange": exchange, "timeframe": timeframe, "limit": limit}
         if source == "top_losers":
@@ -149,13 +166,16 @@ class TradingViewMCPProvider:
         return discovered
 
     async def combined_analysis(self, symbol: str, exchange: str, timeframe: str) -> dict[str, Any]:
+        timeframe = self._normalize_timeframe(timeframe or self.timeframe)
         try:
-            analysis = await self.call_tool("combined_analysis", {"symbol": symbol, "exchange": exchange, "timeframe": timeframe or self.timeframe})
+            analysis = await self.call_tool("combined_analysis", {"symbol": symbol, "exchange": exchange, "timeframe": timeframe})
         except Exception as exc:
-            return await self._analysis_from_quote(symbol, f"combined_analysis failed; fell back to yahoo_price: {type(exc).__name__}: {exc}")
+            quote_symbol = self._quote_symbol(symbol, exchange)
+            return await self._analysis_from_quote(quote_symbol, f"combined_analysis failed; fell back to yahoo_price: {type(exc).__name__}: {exc}")
 
         if self._current_price(analysis) <= 0:
-            quote_analysis = await self._analysis_from_quote(symbol, "combined_analysis returned no usable price; fell back to yahoo_price")
+            quote_symbol = self._quote_symbol(symbol, exchange)
+            quote_analysis = await self._analysis_from_quote(quote_symbol, "combined_analysis returned no usable price; fell back to yahoo_price")
             technical = analysis.setdefault("technical", {})
             price_data = technical.setdefault("price_data", {})
             price_data["current_price"] = quote_analysis["technical"]["price_data"]["current_price"]
@@ -168,6 +188,14 @@ class TradingViewMCPProvider:
             return float(analysis.get("technical", {}).get("price_data", {}).get("current_price") or analysis.get("price") or 0)
         except (TypeError, ValueError):
             return 0.0
+
+    @staticmethod
+    def _quote_symbol(symbol: str, exchange: str) -> str:
+        if infer_asset_class(exchange) == "crypto":
+            broker_symbol = default_crypto_broker_symbol(symbol)
+            if broker_symbol:
+                return broker_symbol.replace("/", "-")
+        return symbol
 
     async def _analysis_from_quote(self, symbol: str, warning: str) -> dict[str, Any]:
         quote = await self.call_tool("yahoo_price", {"symbol": symbol})

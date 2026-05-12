@@ -1,0 +1,35 @@
+extends = "../../config.paper.toml"
+name = "strict-30m-4h"
+description = "Stricter quality gate: 4h analysis, 30m cadence, higher entry score and lower RSI ceiling."
+enabled = true
+ledger_path = "data/farm/strict-30m-4h.sqlite3"
+
+[execution]
+dry_run = true
+live_trading_enabled = false
+scan_interval_seconds = 1800
+initial_delay_seconds = 720
+
+[provider]
+timeframe = "4h"
+
+[strategy]
+entry_score = 72
+exit_score = 40
+max_rsi_for_entry = 65
+stop_loss_pct = 0.07
+take_profit_pct = 0.15
+
+[screener]
+per_source_limit = 10
+max_candidates = 12
+dynamic_sources = ["rating_strong_buy", "rating_buy", "volume_breakout", "top_gainers"]
+
+[broker]
+submit_orders = false
+equity_extended_hours = false
+
+[options]
+enabled = false
+auto_trade = false
+submit_orders = false

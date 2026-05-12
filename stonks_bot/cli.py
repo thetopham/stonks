@@ -3,9 +3,11 @@ from __future__ import annotations
 import argparse
 import asyncio
 from datetime import datetime, timezone
+import json
 from pathlib import Path
 import shutil
 import sys
+import time
 
 from .alpaca import (
     AlpacaConfigError,
@@ -15,10 +17,19 @@ from .alpaca import (
     load_default_env_files,
 )
 from .config import load_config
+from .farm import FarmVariant, assert_shadow_safe, collect_farm_status, discover_farm_variants, format_farm_status
 from .ledger import PaperLedger
 from .options import OptionsPaperLedger, format_options_status, options_paper_once, options_scan_once, sync_options_cash_from_account
 from .dashboard import serve_dashboard
 from .mcp_client import TradingViewMCPProvider
+from .models import WatchItem
+from .research import (
+    build_backtest_experiments,
+    config_to_jsonable,
+    format_backtest_report,
+    load_backtest_farm_config,
+    run_backtest_farm,
+)
 from .runner import format_status, run_once, screen_once
 
 
@@ -88,6 +99,13 @@ async def _options_paper(config_path: Path, env_paths=None) -> str:
 
 
 async def _watch(config_path: Path) -> None:
+    initial_config = load_config(config_path)
+    if initial_config.execution.initial_delay_seconds > 0:
+        print(
+            f"stonks-paper-bot initial delay: {initial_config.execution.initial_delay_seconds}s before first scan",
+            flush=True,
+        )
+        await asyncio.sleep(initial_config.execution.initial_delay_seconds)
     while True:
         config = load_config(config_path)
         try:
@@ -100,6 +118,67 @@ async def _watch(config_path: Path) -> None:
             except Exception as exc:  # pragma: no cover - defensive around long-running service loop
                 print(f"stonks-paper-bot options auto-trade failed: {type(exc).__name__}: {exc}", flush=True)
         await asyncio.sleep(config.execution.scan_interval_seconds)
+
+
+async def _farm_run_variant(variant: FarmVariant) -> str:
+    config = load_config(variant.path)
+    assert_shadow_safe(config, variant_name=variant.name)
+    ledger = PaperLedger(config.ledger_path, starting_cash=config.starting_cash)
+    try:
+        async with TradingViewMCPProvider(config.provider.command, config.provider.args, config.provider.timeframe) as provider:
+            result = await run_once(config, ledger, provider, broker=None)
+    finally:
+        ledger.close()
+    return f"=== farm variant: {variant.name} ({config.provider.timeframe}, {config.execution.scan_interval_seconds // 60}m) ===\n{result}"
+
+
+async def _farm_run_once(farm_dir: Path) -> str:
+    variants = [variant for variant in discover_farm_variants(farm_dir) if variant.enabled]
+    if not variants:
+        return f"No enabled strategy variants found in {farm_dir}"
+    reports: list[str] = []
+    for variant in variants:
+        try:
+            reports.append(await _farm_run_variant(variant))
+        except Exception as exc:  # pragma: no cover - defensive around operator batch command
+            reports.append(f"=== farm variant: {variant.name} ===\nERROR {type(exc).__name__}: {exc}")
+    return "\n\n".join(reports)
+
+
+async def _backtest_farm(bot_config_path: Path, research_config_path: Path) -> dict:
+    bot_config = load_config(bot_config_path)
+    research_config = load_backtest_farm_config(research_config_path)
+    async with TradingViewMCPProvider(bot_config.provider.command, bot_config.provider.args, bot_config.provider.timeframe) as provider:
+        return await run_backtest_farm(research_config, provider)
+
+
+async def _farm_watch(farm_dir: Path, poll_seconds: int) -> None:
+    print(f"stonks-paper strategy farm starting: dir={farm_dir}, poll={poll_seconds}s", flush=True)
+    next_due: dict[str, float] = {}
+    while True:
+        now = time.monotonic()
+        variants = [variant for variant in discover_farm_variants(farm_dir) if variant.enabled]
+        active_names = {variant.name for variant in variants}
+        for stale_name in set(next_due) - active_names:
+            next_due.pop(stale_name, None)
+        for variant in variants:
+            try:
+                config = load_config(variant.path)
+                assert_shadow_safe(config, variant_name=variant.name)
+            except Exception as exc:
+                print(f"strategy farm skipped {variant.name}: {type(exc).__name__}: {exc}", flush=True)
+                next_due[variant.name] = now + max(poll_seconds, 60)
+                continue
+            if variant.name not in next_due:
+                next_due[variant.name] = now + config.execution.initial_delay_seconds
+            if now < next_due[variant.name]:
+                continue
+            try:
+                print(await _farm_run_variant(variant), flush=True)
+            except Exception as exc:  # pragma: no cover - defensive around long-running farm loop
+                print(f"strategy farm scan failed for {variant.name}: {type(exc).__name__}: {exc}", flush=True)
+            next_due[variant.name] = time.monotonic() + config.execution.scan_interval_seconds
+        await asyncio.sleep(max(1, poll_seconds))
 
 
 def _as_float(value: object, default: float = 0.0) -> float:
@@ -120,27 +199,38 @@ def _backup_ledger(path: Path) -> Path | None:
     return backup_path
 
 
-def _broker_position_snapshots(raw_positions: list[dict], watch_exchange_by_symbol: dict[str, str]) -> list[dict]:
+def _broker_position_snapshots(raw_positions: list[dict], watchlist: list[WatchItem]) -> list[dict]:
     snapshots: list[dict] = []
+    watch_by_symbol = {item.symbol: item for item in watchlist}
+    watch_by_broker_symbol = {item.broker_symbol: item for item in watchlist if item.broker_symbol}
     for raw in raw_positions:
-        symbol = str(raw.get("symbol") or "").upper()
+        raw_symbol = str(raw.get("symbol") or "").upper()
+        watch_item = watch_by_symbol.get(raw_symbol) or watch_by_broker_symbol.get(raw_symbol)
+        symbol = watch_item.symbol if watch_item is not None else raw_symbol
         quantity = _as_float(raw.get("qty", raw.get("quantity")), 0.0)
         entry_price = _as_float(raw.get("avg_entry_price", raw.get("entry_price")), 0.0)
         if not symbol or quantity == 0 or entry_price <= 0:
             continue
         last_price = _as_float(raw.get("current_price", raw.get("last_price")), entry_price)
+        exchange = str(raw.get("exchange") or (watch_item.exchange if watch_item is not None else "NASDAQ")).upper()
+        asset_class = watch_item.asset_class if watch_item is not None else ("crypto" if "/" in raw_symbol else "equity")
+        broker_symbol = watch_item.broker_symbol if watch_item is not None else (raw_symbol if asset_class == "crypto" else None)
+        metadata = {
+            "broker_synced": True,
+            "broker": "alpaca",
+            "asset_id": raw.get("asset_id"),
+            "asset_class": asset_class,
+        }
+        if broker_symbol and broker_symbol != symbol:
+            metadata["broker_symbol"] = broker_symbol
         snapshots.append(
             {
                 "symbol": symbol,
-                "exchange": str(raw.get("exchange") or watch_exchange_by_symbol.get(symbol) or "NASDAQ").upper(),
+                "exchange": exchange,
                 "quantity": quantity,
                 "entry_price": entry_price,
                 "last_price": last_price,
-                "metadata": {
-                    "broker_synced": True,
-                    "broker": "alpaca",
-                    "asset_id": raw.get("asset_id"),
-                },
+                "metadata": metadata,
             }
         )
     return snapshots
@@ -179,6 +269,24 @@ def main(argv: list[str] | None = None) -> int:
 
     watch = sub.add_parser("watch", help="run autonomous paper scans forever until interrupted")
     watch.add_argument("--config", type=Path, default=Path("config.paper.toml"))
+
+    farm_status = sub.add_parser("farm-status", help="summarize all local-only strategy-farm variant ledgers")
+    farm_status.add_argument("--farm-dir", type=Path, default=Path("configs/farm"))
+    farm_status.add_argument("--include-disabled", action="store_true")
+    farm_status.add_argument("--json", action="store_true")
+
+    farm_run_once = sub.add_parser("farm-run-once", help="run every enabled local-only strategy-farm variant once, sequentially")
+    farm_run_once.add_argument("--farm-dir", type=Path, default=Path("configs/farm"))
+
+    farm_watch = sub.add_parser("farm-watch", help="run the local-only strategy farm scheduler forever")
+    farm_watch.add_argument("--farm-dir", type=Path, default=Path("configs/farm"))
+    farm_watch.add_argument("--poll-seconds", type=int, default=30)
+
+    backtest_farm = sub.add_parser("backtest-farm", help="run a read-only TradingView MCP strategy backtest matrix")
+    backtest_farm.add_argument("--config", type=Path, default=Path("config.paper.toml"), help="bot config used only for the MCP provider command")
+    backtest_farm.add_argument("--research-config", type=Path, default=Path("configs/research/backtest-farm.toml"))
+    backtest_farm.add_argument("--json", action="store_true")
+    backtest_farm.add_argument("--dry-plan", action="store_true", help="print the parsed backtest matrix without running MCP calls")
 
     dashboard = sub.add_parser("dashboard", help="serve the read-only paper ledger dashboard")
     dashboard.add_argument("--config", type=Path, default=Path("config.paper.toml"))
@@ -272,6 +380,53 @@ def main(argv: list[str] | None = None) -> int:
             print("stopped")
         return 0
 
+    if args.command == "farm-status":
+        status_data = collect_farm_status(args.farm_dir, include_disabled=args.include_disabled)
+        if args.json:
+            print(json.dumps(status_data, indent=2, sort_keys=True))
+        else:
+            print(format_farm_status(status_data))
+        return 0
+
+    if args.command == "farm-run-once":
+        print(asyncio.run(_farm_run_once(args.farm_dir)))
+        return 0
+
+    if args.command == "farm-watch":
+        try:
+            asyncio.run(_farm_watch(args.farm_dir, args.poll_seconds))
+        except KeyboardInterrupt:
+            print("stopped")
+        return 0
+
+    if args.command == "backtest-farm":
+        if args.dry_plan:
+            research_config = load_backtest_farm_config(args.research_config)
+            experiments = build_backtest_experiments(research_config)
+            payload = config_to_jsonable(research_config)
+            payload["boundary"] = "RESEARCH ONLY — dry plan; no MCP calls"
+            payload["experiment_count"] = len(experiments)
+            payload["preview"] = [
+                {
+                    "symbol": experiment.symbol,
+                    "strategy": experiment.strategy,
+                    "period": experiment.period,
+                    "interval": experiment.interval,
+                    "initial_capital": experiment.initial_capital,
+                    "commission_pct": experiment.commission_pct,
+                    "slippage_pct": experiment.slippage_pct,
+                }
+                for experiment in experiments[:25]
+            ]
+            print(json.dumps(payload, indent=2, sort_keys=True))
+            return 0
+        result = asyncio.run(_backtest_farm(args.config, args.research_config))
+        if args.json:
+            print(json.dumps(result, indent=2, sort_keys=True, default=str))
+        else:
+            print(format_backtest_report(result))
+        return 0
+
     if args.command == "dashboard":
         serve_dashboard(args.config, host=args.host, port=args.port)
         return 0
@@ -302,8 +457,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Alpaca sync failed: {exc}", file=sys.stderr)
             return 2
 
-        watch_exchange_by_symbol = {item.symbol: item.exchange for item in config.watchlist}
-        snapshots = _broker_position_snapshots(raw_positions, watch_exchange_by_symbol)
+        snapshots = _broker_position_snapshots(raw_positions, config.watchlist)
         cash = _as_float(account.get("cash"), config.starting_cash)
         print("Boundary: READ-ONLY Alpaca paper account sync — no orders submitted")
         print(f"Endpoint: {credentials.endpoint}")

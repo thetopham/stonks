@@ -3,10 +3,11 @@ from __future__ import annotations
 import re
 
 from .config import BotConfig
-from .models import WatchItem
+from .models import WatchItem, default_crypto_broker_symbol, infer_asset_class
 
 
 _TRADEABLE_SYMBOL_RE = re.compile(r"^[A-Z][A-Z0-9.\-]{0,14}$")
+_CRYPTO_SYMBOL_RE = re.compile(r"^[A-Z0-9]{4,20}$")
 
 
 CURATED_UNIVERSES: dict[str, list[WatchItem]] = {
@@ -76,6 +77,16 @@ CURATED_UNIVERSES: dict[str, list[WatchItem]] = {
         WatchItem("RKLB", "NASDAQ"),
         WatchItem("ASTS", "NASDAQ"),
     ],
+    "crypto_major": [
+        WatchItem("BTCUSDT", "BINANCE", "crypto", "BTC/USD"),
+        WatchItem("ETHUSDT", "BINANCE", "crypto", "ETH/USD"),
+        WatchItem("SOLUSDT", "BINANCE", "crypto", "SOL/USD"),
+        WatchItem("DOGEUSDT", "BINANCE", "crypto", "DOGE/USD"),
+        WatchItem("AVAXUSDT", "BINANCE", "crypto", "AVAX/USD"),
+        WatchItem("LINKUSDT", "BINANCE", "crypto", "LINK/USD"),
+        WatchItem("LTCUSDT", "BINANCE", "crypto", "LTC/USD"),
+        WatchItem("BCHUSDT", "BINANCE", "crypto", "BCH/USD"),
+    ],
 }
 
 
@@ -91,6 +102,14 @@ def normalize_watch_item(symbol: str, exchange: str) -> WatchItem | None:
         if maybe_exchange.strip():
             raw_exchange = maybe_exchange.strip().upper()
         raw_symbol = maybe_symbol.strip().upper()
+
+    asset_class = infer_asset_class(raw_exchange)
+    if asset_class == "crypto":
+        broker_symbol = default_crypto_broker_symbol(raw_symbol)
+        raw_symbol = raw_symbol.replace("/", "").replace("-", "")
+        if not _CRYPTO_SYMBOL_RE.match(raw_symbol):
+            return None
+        return WatchItem(symbol=raw_symbol, exchange=raw_exchange, asset_class="crypto", broker_symbol=broker_symbol)
 
     # Avoid preferred-share/unit/warrant strings such as BRK/PB or AACBU-like
     # exchange artifacts when possible. The bot can still include them manually
@@ -109,8 +128,13 @@ def _append_unique(
     exchange: str,
     excluded: set[str],
     protected_symbols: set[str] | None = None,
+    asset_class: str | None = None,
+    broker_symbol: str | None = None,
 ) -> None:
-    item = normalize_watch_item(symbol, exchange)
+    if asset_class or broker_symbol:
+        item = WatchItem(symbol=symbol, exchange=exchange, asset_class=asset_class or "auto", broker_symbol=broker_symbol)
+    else:
+        item = normalize_watch_item(symbol, exchange)
     if item is None:
         return
     protected_symbols = protected_symbols or set()
@@ -141,7 +165,7 @@ def build_static_candidate_universe(config: BotConfig, *, cap: bool = True) -> l
     for universe in universes:
         if universe == "watchlist":
             for item in config.watchlist:
-                _append_unique(items, seen, item.symbol, item.exchange, excluded)
+                _append_unique(items, seen, item.symbol, item.exchange, excluded, asset_class=item.asset_class, broker_symbol=item.broker_symbol)
         else:
             try:
                 universe_items = CURATED_UNIVERSES[universe]
@@ -149,7 +173,7 @@ def build_static_candidate_universe(config: BotConfig, *, cap: bool = True) -> l
                 available = ", ".join(["watchlist", *sorted(CURATED_UNIVERSES)])
                 raise ValueError(f"unknown screener universe '{universe}'; available: {available}") from exc
             for item in universe_items:
-                _append_unique(items, seen, item.symbol, item.exchange, excluded)
+                _append_unique(items, seen, item.symbol, item.exchange, excluded, asset_class=item.asset_class, broker_symbol=item.broker_symbol)
 
         if cap and len(items) >= config.screener.max_candidates:
             return items[: config.screener.max_candidates]
@@ -177,7 +201,10 @@ def merge_candidate_universes(
 
     for candidate_list in candidate_lists:
         for item in candidate_list:
-            normalized = normalize_watch_item(item.symbol, item.exchange)
+            if item.asset_class or item.broker_symbol:
+                normalized = WatchItem(item.symbol, item.exchange, item.asset_class, item.broker_symbol)
+            else:
+                normalized = normalize_watch_item(item.symbol, item.exchange)
             if normalized is None or normalized.symbol in seen:
                 continue
             if normalized.symbol in excluded and normalized.symbol not in protected_symbols:

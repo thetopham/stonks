@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Iterable
+from zoneinfo import ZoneInfo
 import json
 import os
 import shutil
@@ -37,6 +39,32 @@ class BrokerFill:
     notional: float
 
 
+def alpaca_equity_24_5_is_open(now: datetime | None = None) -> bool:
+    """Return true during Alpaca's Sunday 8 PM ET through Friday 8 PM ET equity window."""
+    eastern = ZoneInfo("America/New_York")
+    current = now or datetime.now(tz=eastern)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=eastern)
+    else:
+        current = current.astimezone(eastern)
+
+    weekday = current.weekday()  # Monday=0, Sunday=6
+    minutes = current.hour * 60 + current.minute
+    sunday_open = 20 * 60
+    friday_close = 20 * 60
+    if weekday == 6:
+        return minutes >= sunday_open
+    if 0 <= weekday <= 3:
+        return True
+    if weekday == 4:
+        return minutes < friday_close
+    return False
+
+
+def _format_order_decimal(value: float) -> str:
+    return f"{value:.8f}".rstrip("0").rstrip(".")
+
+
 def _parse_env_lines(path: Path) -> dict[str, str]:
     values: dict[str, str] = {}
     for raw_line in path.read_text(errors="ignore").splitlines():
@@ -58,9 +86,7 @@ def load_dotenv(path: str | Path = ".env") -> bool:
     if not env_path.exists():
         return False
     for key, value in _parse_env_lines(env_path).items():
-        if not value:
-            continue
-        if key not in os.environ or not os.environ.get(key):
+        if key not in os.environ or (os.environ.get(key) == "" and value):
             os.environ[key] = value
     return True
 
@@ -101,7 +127,15 @@ def _hermes_cli_env_path() -> Path | None:
     first_line = result.stdout.strip().splitlines()[0] if result.stdout.strip() else ""
     if not first_line:
         return None
-    return Path(first_line).expanduser()
+    path = Path(first_line).expanduser()
+    try:
+        path_resolved = path.resolve()
+        home_resolved = Path.home().resolve()
+        if not path_resolved.is_relative_to(home_resolved):
+            return None
+    except (OSError, RuntimeError):
+        return None
+    return path
 
 
 def default_env_paths(config_path: str | Path | None = None) -> list[Path]:
@@ -132,9 +166,9 @@ def load_default_env_files(config_path: str | Path | None = None, extra_paths: I
 
 def _env_value(name: str, *aliases: str) -> str | None:
     for candidate in (name, *aliases):
-        value = os.environ.get(candidate)
-        if value:
-            return value
+        if candidate in os.environ:
+            value = os.environ.get(candidate)
+            return value if value else None
     return None
 
 
@@ -289,11 +323,13 @@ class AlpacaPaperClient:
     def cancel_order(self, order_id: str) -> dict:
         return self._request_json(f"/orders/{order_id}", method="DELETE")
 
-    def market_is_open(self) -> tuple[bool, str]:
+    def market_is_open(self, *, extended_hours: bool = False) -> tuple[bool, str]:
         clock = self.get_clock()
         if bool(clock.get("is_open")):
             return True, "market open"
         next_open = clock.get("next_open") or "unknown"
+        if extended_hours and alpaca_equity_24_5_is_open():
+            return True, f"24/5 extended-hours session; next_regular_open={next_open}"
         return False, f"market closed; next_open={next_open}"
 
     def _submit_order_payload(self, payload: dict, *, fill_multiplier: float = 1.0) -> BrokerFill:
@@ -342,7 +378,78 @@ class AlpacaPaperClient:
         if notional is not None:
             payload["notional"] = f"{notional:.2f}"
         else:
-            payload["qty"] = f"{quantity:.8f}".rstrip("0").rstrip(".")
+            payload["qty"] = _format_order_decimal(quantity)
+        return self._submit_order_payload(payload)
+
+    def submit_extended_hours_limit_order(
+        self,
+        symbol: str,
+        *,
+        side: str,
+        limit_price: float,
+        notional: float | None = None,
+        quantity: float | None = None,
+        time_in_force: str = "day",
+    ) -> BrokerFill:
+        side = side.lower()
+        symbol = symbol.upper()
+        time_in_force = time_in_force.lower()
+        if side not in {"buy", "sell"}:
+            raise AlpacaConfigError("Alpaca extended-hours order side must be buy or sell")
+        if time_in_force not in {"day", "gtc"}:
+            raise AlpacaConfigError("Alpaca extended-hours order time_in_force must be day or gtc")
+        if limit_price <= 0:
+            raise AlpacaConfigError("Alpaca extended-hours limit_price must be positive")
+        if (notional is None) == (quantity is None):
+            raise AlpacaConfigError("Alpaca extended-hours limit order requires exactly one of notional or quantity")
+        if notional is not None and notional <= 0:
+            raise AlpacaConfigError("Alpaca extended-hours order notional must be positive")
+        if quantity is not None and quantity <= 0:
+            raise AlpacaConfigError("Alpaca extended-hours order quantity must be positive")
+
+        payload = {
+            "symbol": symbol,
+            "side": side,
+            "type": "limit",
+            "limit_price": f"{limit_price:.2f}",
+            "time_in_force": time_in_force,
+            "extended_hours": True,
+        }
+        if notional is not None:
+            payload["notional"] = f"{notional:.2f}"
+        else:
+            payload["qty"] = _format_order_decimal(quantity)
+        return self._submit_order_payload(payload)
+
+    def submit_crypto_market_order(
+        self,
+        symbol: str,
+        *,
+        side: str,
+        notional: float | None = None,
+        quantity: float | None = None,
+    ) -> BrokerFill:
+        side = side.lower()
+        symbol = symbol.upper()
+        if side not in {"buy", "sell"}:
+            raise AlpacaConfigError("Alpaca crypto order side must be buy or sell")
+        if (notional is None) == (quantity is None):
+            raise AlpacaConfigError("Alpaca crypto market order requires exactly one of notional or quantity")
+        if notional is not None and notional <= 0:
+            raise AlpacaConfigError("Alpaca crypto market order notional must be positive")
+        if quantity is not None and quantity <= 0:
+            raise AlpacaConfigError("Alpaca crypto market order quantity must be positive")
+
+        payload = {
+            "symbol": symbol,
+            "side": side,
+            "type": "market",
+            "time_in_force": "gtc",
+        }
+        if notional is not None:
+            payload["notional"] = f"{notional:.2f}"
+        else:
+            payload["qty"] = _format_order_decimal(quantity)
         return self._submit_order_payload(payload)
 
     def submit_option_limit_order(self, symbol: str, *, side: str, contracts: int, limit_price: float) -> BrokerFill:
@@ -381,6 +488,18 @@ class AlpacaPaperClient:
 
     def submit_sell(self, symbol: str, quantity: float) -> BrokerFill:
         return self.submit_market_order(symbol, side="sell", quantity=quantity)
+
+    def submit_extended_hours_buy(self, symbol: str, notional: float, limit_price: float, time_in_force: str = "day") -> BrokerFill:
+        return self.submit_extended_hours_limit_order(symbol, side="buy", notional=notional, limit_price=limit_price, time_in_force=time_in_force)
+
+    def submit_extended_hours_sell(self, symbol: str, quantity: float, limit_price: float, time_in_force: str = "day") -> BrokerFill:
+        return self.submit_extended_hours_limit_order(symbol, side="sell", quantity=quantity, limit_price=limit_price, time_in_force=time_in_force)
+
+    def submit_crypto_buy(self, symbol: str, notional: float) -> BrokerFill:
+        return self.submit_crypto_market_order(symbol, side="buy", notional=notional)
+
+    def submit_crypto_sell(self, symbol: str, quantity: float) -> BrokerFill:
+        return self.submit_crypto_market_order(symbol, side="sell", quantity=quantity)
 
     def _filled_order(self, order: dict, *, fill_multiplier: float = 1.0) -> BrokerFill | None:
         status = str(order.get("status", "unknown")).lower()

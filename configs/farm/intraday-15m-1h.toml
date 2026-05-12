@@ -1,0 +1,28 @@
+extends = "../../config.paper.toml"
+name = "intraday-15m-1h"
+description = "More active intraday-ish test: 15m cadence with 1h TradingView analysis."
+enabled = true
+ledger_path = "data/farm/intraday-15m-1h.sqlite3"
+
+[execution]
+dry_run = true
+live_trading_enabled = false
+scan_interval_seconds = 900
+initial_delay_seconds = 360
+
+[provider]
+timeframe = "1h"
+
+[screener]
+per_source_limit = 10
+max_candidates = 12
+dynamic_sources = ["rating_strong_buy", "rating_buy", "volume_breakout", "top_gainers"]
+
+[broker]
+submit_orders = false
+equity_extended_hours = false
+
+[options]
+enabled = false
+auto_trade = false
+submit_orders = false

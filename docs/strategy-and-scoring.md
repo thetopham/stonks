@@ -2,7 +2,7 @@
 
 Stonks Paper Bot is a ranked stock screener plus paper ledger. On each scan it builds a candidate universe, asks TradingView MCP for `combined_analysis` on each configured symbol and timeframe, turns every response into a 0-100 technical score, then applies deterministic BUY/HOLD/SELL gates.
 
-By default, BUY/SELL fills are local SQLite simulations. If `[broker] submit_orders = true` with Alpaca `paper_only = true`, accepted BUY/SELL signals submit Alpaca paper market orders while the market is open; only confirmed filled paper orders are recorded in SQLite.
+By default, BUY/SELL fills are local SQLite simulations. If `[broker] submit_orders = true` with Alpaca `paper_only = true`, accepted BUY/SELL signals submit Alpaca paper equity/crypto orders and only confirmed filled paper orders are recorded in SQLite. Regular equity mode uses paper market orders while the Alpaca clock is open; `broker.equity_extended_hours=true` switches equities to 24/5-compatible limit orders with `extended_hours=true` and `day`/`gtc` time-in-force.
 
 The current runtime scores all candidates before acting, processes SELL exits first, then ranks BUY candidates by portfolio-adjusted score before allocating paper cash.
 
@@ -41,7 +41,7 @@ For each candidate item, the runner calls:
 
 - MCP tool: `combined_analysis`
 - Arguments: `symbol`, `exchange`, and `provider.timeframe`
-- Default timeframe: `1D`
+- Default timeframe: `4h`
 
 If `combined_analysis` fails or returns no usable current price, the provider falls back to `yahoo_price`. A quote-only fallback supplies price but has unknown bias, no RSI, no MACD, and no moving-average signals, so it usually scores close to the neutral base of 50.
 
@@ -134,7 +134,7 @@ Local simulated paper fill prices include slippage:
 
 The default `slippage_pct = 0.02` means 0.02%, not 2%.
 
-When Alpaca paper order submission is enabled, slippage is not applied locally. The bot uses Alpaca's confirmed `filled_avg_price` and `filled_qty`; if an order is not filled after polling, the bot attempts to cancel it and does not write a ledger fill.
+When Alpaca paper order submission is enabled, slippage is not applied locally to confirmed fills. The bot uses Alpaca's confirmed `filled_avg_price` and `filled_qty`; if an order is not filled after polling, the bot attempts to cancel it and does not write a ledger fill. In equity 24/5 mode, the same `slippage_pct` is used only to set a protective limit price around the signal price before Alpaca paper execution.
 
 `commission_pct` is parsed from config but is not currently applied by the runner. Treat it as a reserved setting until commission accounting is implemented.
 
@@ -152,8 +152,8 @@ Watchlist-order bias is fixed when `[selection] mode = "ranked"`. Earlier symbol
 
 At the time this documentation was written, `config.paper.toml` used:
 
-- MCP scanner discovery enabled with `screener.source = "mcp"`, `screener.exchanges = ["NASDAQ", "NYSE"]`, and dynamic sources such as rating filters, volume breakout, smart volume, and top gainers
-- `max_open_positions = 100000`
+- MCP scanner discovery enabled with `screener.source = "mcp"`, `screener.exchanges = ["NASDAQ", "NYSE", "BINANCE", "KUCOIN"]`, and dynamic sources such as rating filters, volume breakout, smart volume, and top gainers
+- `max_open_positions = 25`
 - `max_position_pct = 0.10`
 - `entry_score = 65`
 - `exit_score = 35`
@@ -161,6 +161,9 @@ At the time this documentation was written, `config.paper.toml` used:
 - `selection.mode = "ranked"`
 - `optimizer.cash_reserve_pct = 0.05`
 - `optimizer.max_new_buys_per_scan = 10`
-- `scan_interval_seconds = 900`
+- `broker.equity_extended_hours = true` for Alpaca paper 24/5-compatible equity limit orders
+- `scan_interval_seconds = 1800` — the main watch loop scans every 30 minutes, using the configured `4h` analysis timeframe
 
-These are config values, not hard-coded strategy constants. Check `config.paper.toml` and the dashboard API for the live settings.
+Strategy-farm variants under `configs/farm/` intentionally test other combinations such as original `15m/1d`, `15m/1h`, and stricter/aggressive score gates. Those variants use separate local SQLite ledgers and are forced to `broker.submit_orders=false`, so they do not compete for the Alpaca paper account.
+
+These are config values, not hard-coded strategy constants. Check `config.paper.toml`, `configs/farm/*.toml`, and the dashboard API for the live settings.

@@ -48,6 +48,28 @@ def test_collect_dashboard_data_summarizes_paper_portfolio_without_network(tmp_p
         {"symbol": "MSFT", "exchange": "NASDAQ"},
     ]
 
+def test_collect_dashboard_data_exposes_crypto_position_metadata(tmp_path):
+    config = _config(tmp_path)
+    ledger = PaperLedger(config.ledger_path, starting_cash=config.starting_cash)
+    ledger.buy(
+        "BTCUSDT",
+        "BINANCE",
+        price=50_000,
+        notional=1_000,
+        reason="crypto entry",
+        metadata={"asset_class": "crypto", "broker_symbol": "BTC/USD", "score": 90},
+    )
+    ledger.mark_price("BTCUSDT", 51_000)
+
+    data = collect_dashboard_data(config, ledger, service_names=[])
+
+    assert data["positions"][0]["symbol"] == "BTCUSDT"
+    assert data["positions"][0]["exchange"] == "BINANCE"
+    assert data["positions"][0]["asset_class"] == "crypto"
+    assert data["positions"][0]["broker_symbol"] == "BTC/USD"
+    assert data["recent_trades"][0]["asset_class"] == "crypto"
+    assert data["recent_trades"][0]["broker_symbol"] == "BTC/USD"
+
 
 def test_collect_dashboard_data_shows_options_cash_source(tmp_path):
     config = _config(tmp_path)

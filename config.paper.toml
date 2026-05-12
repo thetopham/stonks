@@ -10,7 +10,8 @@ slippage_pct = 0.02
 [execution]
 dry_run = true
 live_trading_enabled = false
-scan_interval_seconds = 900
+# Active paper cadence: scan every 30 minutes using 4h technical analysis.
+scan_interval_seconds = 1800
 
 [strategy]
 entry_score = 65
@@ -24,12 +25,12 @@ mode = "ranked"
 preview_top = 15
 
 [screener]
-# Use MCP screeners across NASDAQ/NYSE first; the watchlist is only a guaranteed seed.
+# Use MCP screeners across equities and major crypto exchanges first; the watchlist is only a guaranteed seed.
 # max_candidates caps the slower deep combined_analysis pass after dynamic discovery.
 enabled = true
 source = "mcp"
 universes = ["watchlist"]
-exchanges = ["NASDAQ", "NYSE"]
+exchanges = ["NASDAQ", "NYSE", "BINANCE", "KUCOIN"]
 dynamic_sources = ["rating_strong_buy", "rating_buy", "volume_breakout", "smart_volume", "top_gainers"]
 per_source_limit = 50
 max_candidates = 100
@@ -69,9 +70,9 @@ strike_pct_window = 0.15
 max_underlyings_per_scan = 20
 
 [provider]
-command = "/home/matt/.local/bin/uvx"
-args = ["--from", "tradingview-mcp-server", "tradingview-mcp"]
-timeframe = "1D"
+command = "/home/matt/workspace/stonks-paper-bot/scripts/tradingview-mcp-fixed"
+args = []
+timeframe = "4h"
 
 [broker]
 name = "alpaca"
@@ -80,6 +81,10 @@ key_env = "alpaca_key"
 secret_env = "alpaca_secret"
 paper_only = true
 submit_orders = true
+# Alpaca 24/5 equity trading is opt-in and uses limit orders with extended_hours=true.
+# It remains paper-only here; if Alpaca rejects overnight enablement, no local ledger fill is written.
+equity_extended_hours = true
+equity_extended_hours_time_in_force = "day"
 
 # Existing baseline trackers.
 [[watchlist]]
@@ -89,6 +94,55 @@ exchange = "NASDAQ"
 [[watchlist]]
 symbol = "SPY"
 exchange = "NYSE"
+
+# Major crypto spot pairs. TradingView MCP screens the USDT symbols; Alpaca paper orders use slash USD broker symbols.
+[[watchlist]]
+symbol = "BTCUSDT"
+exchange = "BINANCE"
+asset_class = "crypto"
+broker_symbol = "BTC/USD"
+
+[[watchlist]]
+symbol = "ETHUSDT"
+exchange = "BINANCE"
+asset_class = "crypto"
+broker_symbol = "ETH/USD"
+
+[[watchlist]]
+symbol = "SOLUSDT"
+exchange = "BINANCE"
+asset_class = "crypto"
+broker_symbol = "SOL/USD"
+
+[[watchlist]]
+symbol = "DOGEUSDT"
+exchange = "BINANCE"
+asset_class = "crypto"
+broker_symbol = "DOGE/USD"
+
+[[watchlist]]
+symbol = "AVAXUSDT"
+exchange = "BINANCE"
+asset_class = "crypto"
+broker_symbol = "AVAX/USD"
+
+[[watchlist]]
+symbol = "LINKUSDT"
+exchange = "BINANCE"
+asset_class = "crypto"
+broker_symbol = "LINK/USD"
+
+[[watchlist]]
+symbol = "LTCUSDT"
+exchange = "BINANCE"
+asset_class = "crypto"
+broker_symbol = "LTC/USD"
+
+[[watchlist]]
+symbol = "BCHUSDT"
+exchange = "BINANCE"
+asset_class = "crypto"
+broker_symbol = "BCH/USD"
 
 # AI Supercycle Phase 1 — semis, memory/storage, photonics/optics.
 [[watchlist]]

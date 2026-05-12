@@ -72,7 +72,7 @@ class OpenFakeBroker:
         self.buy_requests = []
         self.sell_requests = []
 
-    def market_is_open(self):
+    def market_is_open(self, *, extended_hours=False):
         return True, "market open"
 
     def submit_buy(self, symbol, notional):
@@ -88,12 +88,62 @@ class ClosedFakeBroker:
     def __init__(self):
         self.buy_requests = []
 
-    def market_is_open(self):
+    def market_is_open(self, *, extended_hours=False):
         return False, "market closed"
 
     def submit_buy(self, symbol, notional):
         self.buy_requests.append((symbol, notional))
         raise AssertionError("closed market should not submit orders")
+
+
+class ExtendedHoursFakeBroker:
+    def __init__(self):
+        self.market_requests = []
+        self.buy_requests = []
+        self.sell_requests = []
+        self.extended_buy_requests = []
+        self.extended_sell_requests = []
+
+    def market_is_open(self, *, extended_hours=False):
+        self.market_requests.append(extended_hours)
+        if extended_hours:
+            return True, "24/5 extended-hours session"
+        return False, "regular market closed"
+
+    def submit_buy(self, symbol, notional):
+        self.buy_requests.append((symbol, notional))
+        raise AssertionError("extended-hours mode should not submit equity market orders")
+
+    def submit_sell(self, symbol, quantity):
+        self.sell_requests.append((symbol, quantity))
+        raise AssertionError("extended-hours mode should not submit equity market orders")
+
+    def submit_extended_hours_buy(self, symbol, notional, limit_price, time_in_force):
+        self.extended_buy_requests.append((symbol, notional, limit_price, time_in_force))
+        return FakeFill("extended-buy-1", symbol, "buy", "filled", 10.0, 101.0, 1010.0)
+
+    def submit_extended_hours_sell(self, symbol, quantity, limit_price, time_in_force):
+        self.extended_sell_requests.append((symbol, quantity, limit_price, time_in_force))
+        return FakeFill("extended-sell-1", symbol, "sell", "filled", quantity, 89.0, quantity * 89.0)
+
+
+class CryptoFakeBroker:
+    def __init__(self):
+        self.crypto_buy_requests = []
+        self.crypto_sell_requests = []
+        self.clock_checks = 0
+
+    def market_is_open(self, *, extended_hours=False):
+        self.clock_checks += 1
+        return False, "equity market closed"
+
+    def submit_crypto_buy(self, symbol, notional):
+        self.crypto_buy_requests.append((symbol, notional))
+        return FakeFill("crypto-buy-1", symbol, "buy", "filled", 0.02, 50_000.0, 1_000.0)
+
+    def submit_crypto_sell(self, symbol, quantity):
+        self.crypto_sell_requests.append((symbol, quantity))
+        return FakeFill("crypto-sell-1", symbol, "sell", "filled", quantity, 55_000.0, quantity * 55_000.0)
 
 
 def _config(tmp_path, *, submit_orders=False):
@@ -305,3 +355,61 @@ def test_run_once_does_not_submit_broker_buy_when_market_is_closed(tmp_path):
     assert "BROKER HOLD AAPL: market closed" in report
     assert ledger.get_position("AAPL") is None
     assert ledger.cash == 10_000
+
+
+def test_run_once_submits_equity_24_5_limit_order_when_extended_hours_enabled(tmp_path):
+    config = _config(tmp_path, submit_orders=True)
+    config.broker.equity_extended_hours = True
+    config.broker.equity_extended_hours_time_in_force = "day"
+    config.slippage_pct = 1.0
+    ledger = PaperLedger(config.ledger_path, starting_cash=config.starting_cash)
+    broker = ExtendedHoursFakeBroker()
+    provider = MappingProvider({"AAPL": _analysis(price=100, bias="Bullish", rsi=55, macd="Bullish")})
+
+    report = asyncio.run(run_once(config, ledger, provider, broker=broker))
+
+    assert broker.market_requests == [True]
+    assert broker.buy_requests == []
+    assert broker.extended_buy_requests == [("AAPL", 1000.0, 101.0, "day")]
+    assert "ALPACA PAPER 24/5 BUY AAPL" in report
+    position = ledger.get_position("AAPL")
+    assert position is not None
+    assert position.metadata["broker_order_id"] == "extended-buy-1"
+
+
+def test_run_once_submits_equity_24_5_limit_sell_when_extended_hours_enabled(tmp_path):
+    config = _config(tmp_path, submit_orders=True)
+    config.broker.equity_extended_hours = True
+    config.broker.equity_extended_hours_time_in_force = "day"
+    config.slippage_pct = 1.0
+    ledger = PaperLedger(config.ledger_path, starting_cash=config.starting_cash)
+    ledger.buy("AAPL", "NASDAQ", price=100.0, notional=1000.0, reason="seed", metadata={"asset_class": "equity"})
+    broker = ExtendedHoursFakeBroker()
+    provider = MappingProvider({"AAPL": _analysis(price=90, bias="Bearish", rsi=45, macd="Bearish")})
+
+    report = asyncio.run(run_once(config, ledger, provider, broker=broker))
+
+    assert broker.market_requests == [True]
+    assert broker.sell_requests == []
+    assert broker.extended_sell_requests == [("AAPL", 10.0, 89.1, "day")]
+    assert "ALPACA PAPER 24/5 SELL AAPL" in report
+    assert ledger.get_position("AAPL") is None
+
+
+def test_run_once_submits_crypto_paper_buy_with_alpaca_symbol_without_equity_clock(tmp_path):
+    config = _config(tmp_path, submit_orders=True)
+    config.watchlist = [WatchItem(symbol="BTCUSDT", exchange="BINANCE", asset_class="crypto", broker_symbol="BTC/USD")]
+    ledger = PaperLedger(config.ledger_path, starting_cash=config.starting_cash)
+    broker = CryptoFakeBroker()
+    provider = MappingProvider({"BTCUSDT": _analysis(price=50_000, bias="Bullish", rsi=55, macd="Bullish")})
+
+    report = asyncio.run(run_once(config, ledger, provider, broker=broker))
+
+    assert broker.clock_checks == 0
+    assert broker.crypto_buy_requests == [("BTC/USD", 1000.0)]
+    assert "ALPACA PAPER CRYPTO BUY BTCUSDT" in report
+    position = ledger.get_position("BTCUSDT")
+    assert position is not None
+    assert position.exchange == "BINANCE"
+    assert position.metadata["asset_class"] == "crypto"
+    assert position.metadata["broker_symbol"] == "BTC/USD"

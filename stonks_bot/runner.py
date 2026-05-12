@@ -5,7 +5,7 @@ from typing import Protocol
 
 from .config import BotConfig
 from .ledger import PaperLedger
-from .models import Position, WatchItem
+from .models import Position, WatchItem, default_crypto_broker_symbol
 from .screener import build_static_candidate_universe, merge_candidate_universes
 from .strategy import Signal, generate_signal
 
@@ -37,9 +37,13 @@ class BrokerFillLike(Protocol):
 
 
 class BrokerExecutor(Protocol):
-    def market_is_open(self) -> tuple[bool, str]: ...
+    def market_is_open(self, *, extended_hours: bool = False) -> tuple[bool, str]: ...
     def submit_buy(self, symbol: str, notional: float) -> BrokerFillLike: ...
     def submit_sell(self, symbol: str, quantity: float) -> BrokerFillLike: ...
+    def submit_extended_hours_buy(self, symbol: str, notional: float, limit_price: float, time_in_force: str) -> BrokerFillLike: ...
+    def submit_extended_hours_sell(self, symbol: str, quantity: float, limit_price: float, time_in_force: str) -> BrokerFillLike: ...
+    def submit_crypto_buy(self, symbol: str, notional: float) -> BrokerFillLike: ...
+    def submit_crypto_sell(self, symbol: str, quantity: float) -> BrokerFillLike: ...
 
 
 @dataclass(slots=True)
@@ -65,18 +69,37 @@ def _boundary_line(config: BotConfig) -> str:
     return "Boundary: LOCAL PAPER ONLY — no broker orders, no live execution"
 
 
-def _broker_metadata(fill: BrokerFillLike, score: float, portfolio_score: float) -> dict:
-    return {
+def _broker_symbol(item: WatchItem) -> str | None:
+    if item.asset_class != "crypto":
+        return item.symbol
+    return item.broker_symbol or default_crypto_broker_symbol(item.symbol)
+
+
+def _metadata_for_item(item: WatchItem) -> dict:
+    metadata = {"asset_class": item.asset_class}
+    broker_symbol = _broker_symbol(item)
+    if broker_symbol and broker_symbol != item.symbol:
+        metadata["broker_symbol"] = broker_symbol
+    return metadata
+
+
+def _broker_metadata(fill: BrokerFillLike, score: float, portfolio_score: float, item: WatchItem | None = None) -> dict:
+    metadata = {
         "score": score,
         "portfolio_score": portfolio_score,
         "broker_order_id": fill.order_id,
         "broker_status": fill.status,
         "broker_side": fill.side,
     }
+    if item is not None:
+        metadata.update(_metadata_for_item(item))
+    return metadata
 
 
 def _local_metadata(evaluation: CandidateEvaluation) -> dict:
-    return {"score": evaluation.signal.score, "portfolio_score": evaluation.portfolio_score}
+    metadata = {"score": evaluation.signal.score, "portfolio_score": evaluation.portfolio_score}
+    metadata.update(_metadata_for_item(evaluation.item))
+    return metadata
 
 
 def _rsi_extension_risk(signal: Signal) -> float:
@@ -135,7 +158,15 @@ def _buy_notional(config: BotConfig, ledger: PaperLedger) -> float:
 
 
 async def _candidate_universe(config: BotConfig, ledger: PaperLedger, provider: AnalysisProvider) -> tuple[list[WatchItem], list[str]]:
-    open_items = [WatchItem(position.symbol, position.exchange) for position in ledger.list_positions()]
+    open_items = [
+        WatchItem(
+            position.symbol,
+            position.exchange,
+            str(position.metadata.get("asset_class") or "auto"),
+            str(position.metadata.get("broker_symbol") or "") or None,
+        )
+        for position in ledger.list_positions()
+    ]
     open_symbols = {item.symbol for item in open_items}
     static_items = build_static_candidate_universe(config, cap=False)
     discovery_notes: list[str] = []
@@ -217,20 +248,58 @@ def _execute_sell(
 ) -> str:
     signal = evaluation.signal
     if config.broker.submit_orders:
-        is_open, market_reason = broker_market_state()
-        if not is_open:
-            ledger.mark_price(evaluation.item.symbol, signal.price)
-            return f"BROKER HOLD {evaluation.item.symbol}: {market_reason}; no Alpaca paper sell submitted"
         assert broker is not None
         current_position = ledger.get_position(evaluation.item.symbol)
         if current_position is None:
             return f"HOLD {evaluation.item.symbol}: sell signal but no local paper position"
+
+        if evaluation.item.asset_class == "crypto":
+            broker_symbol = _broker_symbol(evaluation.item)
+            if not broker_symbol:
+                ledger.mark_price(evaluation.item.symbol, signal.price)
+                return f"BROKER HOLD {evaluation.item.symbol}: no Alpaca crypto broker_symbol configured; no paper sell submitted"
+            fill = broker.submit_crypto_sell(broker_symbol, current_position.quantity)
+            trade = ledger.sell(
+                evaluation.item.symbol,
+                price=fill.price,
+                reason="; ".join(signal.reasons[:4]),
+                metadata=_broker_metadata(fill, signal.score, evaluation.portfolio_score, evaluation.item),
+            )
+            return (
+                f"ALPACA PAPER CRYPTO SELL {trade.symbol}: broker_symbol={broker_symbol}, order_id={fill.order_id}, "
+                f"qty={trade.quantity:.4f} @ {trade.price:.2f}, pnl={trade.pnl_realized:.2f}, "
+                f"score={signal.score:.1f}, adj={evaluation.portfolio_score:.1f}"
+            )
+
+        is_open, market_reason = broker_market_state(config.broker.equity_extended_hours)
+        if not is_open:
+            ledger.mark_price(evaluation.item.symbol, signal.price)
+            return f"BROKER HOLD {evaluation.item.symbol}: {market_reason}; no Alpaca paper sell submitted"
+        if config.broker.equity_extended_hours:
+            limit_price = _execution_price(signal.price, "SELL", config.slippage_pct)
+            fill = broker.submit_extended_hours_sell(
+                evaluation.item.symbol,
+                current_position.quantity,
+                limit_price,
+                config.broker.equity_extended_hours_time_in_force,
+            )
+            trade = ledger.sell(
+                evaluation.item.symbol,
+                price=fill.price,
+                reason="; ".join(signal.reasons[:4]),
+                metadata=_broker_metadata(fill, signal.score, evaluation.portfolio_score, evaluation.item),
+            )
+            return (
+                f"ALPACA PAPER 24/5 SELL {trade.symbol}: order_id={fill.order_id}, limit={limit_price:.2f}, "
+                f"qty={trade.quantity:.4f} @ {trade.price:.2f}, pnl={trade.pnl_realized:.2f}, "
+                f"score={signal.score:.1f}, adj={evaluation.portfolio_score:.1f}"
+            )
         fill = broker.submit_sell(evaluation.item.symbol, current_position.quantity)
         trade = ledger.sell(
             evaluation.item.symbol,
             price=fill.price,
             reason="; ".join(signal.reasons[:4]),
-            metadata=_broker_metadata(fill, signal.score, evaluation.portfolio_score),
+            metadata=_broker_metadata(fill, signal.score, evaluation.portfolio_score, evaluation.item),
         )
         return (
             f"ALPACA PAPER SELL {trade.symbol}: order_id={fill.order_id}, qty={trade.quantity:.4f} @ {trade.price:.2f}, "
@@ -252,10 +321,50 @@ def _execute_buy(
 ) -> tuple[bool, str]:
     signal = evaluation.signal
     if config.broker.submit_orders:
-        is_open, market_reason = broker_market_state()
+        assert broker is not None
+        if evaluation.item.asset_class == "crypto":
+            broker_symbol = _broker_symbol(evaluation.item)
+            if not broker_symbol:
+                return False, f"BROKER HOLD {evaluation.item.symbol}: no Alpaca crypto broker_symbol configured; no paper order submitted"
+            fill = broker.submit_crypto_buy(broker_symbol, notional)
+            trade = ledger.buy(
+                evaluation.item.symbol,
+                evaluation.item.exchange,
+                price=fill.price,
+                notional=fill.notional,
+                reason="; ".join(signal.reasons[:4]),
+                metadata=_broker_metadata(fill, signal.score, evaluation.portfolio_score, evaluation.item),
+            )
+            return True, (
+                f"ALPACA PAPER CRYPTO BUY {trade.symbol}: broker_symbol={broker_symbol}, order_id={fill.order_id}, "
+                f"qty={trade.quantity:.4f} @ {trade.price:.2f}, notional={trade.notional:.2f}, "
+                f"score={signal.score:.1f}, adj={evaluation.portfolio_score:.1f}"
+            )
+
+        is_open, market_reason = broker_market_state(config.broker.equity_extended_hours)
         if not is_open:
             return False, f"BROKER HOLD {evaluation.item.symbol}: {market_reason}; no Alpaca paper order submitted"
-        assert broker is not None
+        if config.broker.equity_extended_hours:
+            limit_price = _execution_price(signal.price, "BUY", config.slippage_pct)
+            fill = broker.submit_extended_hours_buy(
+                evaluation.item.symbol,
+                notional,
+                limit_price,
+                config.broker.equity_extended_hours_time_in_force,
+            )
+            trade = ledger.buy(
+                evaluation.item.symbol,
+                evaluation.item.exchange,
+                price=fill.price,
+                notional=fill.notional,
+                reason="; ".join(signal.reasons[:4]),
+                metadata=_broker_metadata(fill, signal.score, evaluation.portfolio_score, evaluation.item),
+            )
+            return True, (
+                f"ALPACA PAPER 24/5 BUY {trade.symbol}: order_id={fill.order_id}, limit={limit_price:.2f}, "
+                f"qty={trade.quantity:.4f} @ {trade.price:.2f}, notional={trade.notional:.2f}, "
+                f"score={signal.score:.1f}, adj={evaluation.portfolio_score:.1f}"
+            )
         fill = broker.submit_buy(evaluation.item.symbol, notional)
         trade = ledger.buy(
             evaluation.item.symbol,
@@ -263,7 +372,7 @@ def _execute_buy(
             price=fill.price,
             notional=fill.notional,
             reason="; ".join(signal.reasons[:4]),
-            metadata=_broker_metadata(fill, signal.score, evaluation.portfolio_score),
+            metadata=_broker_metadata(fill, signal.score, evaluation.portfolio_score, evaluation.item),
         )
         return True, (
             f"ALPACA PAPER BUY {trade.symbol}: order_id={fill.order_id}, qty={trade.quantity:.4f} @ {trade.price:.2f}, "
@@ -315,14 +424,13 @@ async def run_once(config: BotConfig, ledger: PaperLedger, provider: AnalysisPro
         raise ValueError("broker order submission is enabled but no broker executor was provided")
 
     lines = ["stonks-paper-bot scan", _boundary_line(config)]
-    market_state: tuple[bool, str] | None = None
+    market_states: dict[bool, tuple[bool, str]] = {}
 
-    def broker_market_state() -> tuple[bool, str]:
-        nonlocal market_state
-        if market_state is None:
+    def broker_market_state(extended_hours: bool = False) -> tuple[bool, str]:
+        if extended_hours not in market_states:
             assert broker is not None
-            market_state = broker.market_is_open()
-        return market_state
+            market_states[extended_hours] = broker.market_is_open(extended_hours=extended_hours)
+        return market_states[extended_hours]
 
     evaluations, discovery_notes = await _evaluate_candidates(config, ledger, provider)
     if discovery_notes:
